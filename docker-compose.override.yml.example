@@ -1,0 +1,14 @@
+# ============================================================================
+# Local dev overrides — TEMPLATE
+# Copy to docker-compose.override.yml (which is .gitignored) to activate.
+# Provides live-reload for the API during local development.
+# ============================================================================
+services:
+  api:
+    build:
+      target: builder
+    command: ["pnpm", "--filter", "@ai-wealth/api", "run", "start:dev"]
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ../services/api/src:/repo/services/api/src

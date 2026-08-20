@@ -1,0 +1,56 @@
+# AI Wealth — Docker build context ignore
+# Reduces build context size and prevents secrets from leaking into layers.
+
+# Dependencies (we reinstall inside the image)
+**/node_modules/
+.pnpm-store/
+
+# Build outputs (rebuild inside image)
+**/dist/
+**/build/
+**/out/
+**/.next/
+**/.turbo/
+**/*.tsbuildinfo
+
+# Coverage
+coverage/
+**/*.lcov
+
+# Env / secrets — NEVER bake into images
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+private/
+*.seed
+seed-phrase*
+wallet-*
+keystore/*
+keystore.json
+mnemonic*
+
+# Tests / cache
+.cache/
+.eslintcache
+**/__tests__/
+**/*.test.ts
+**/*.test.tsx
+**/jest.config.js
+**/jest.config.cjs
+
+# Docs / git / CI
+.git/
+.github/
+docs/
+README.md
+**/README.md
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

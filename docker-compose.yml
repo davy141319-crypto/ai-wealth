@@ -1,0 +1,217 @@
+# ============================================================================
+# AI Wealth DApp — Docker Compose (P0 foundation)
+# ----------------------------------------------------------------------------
+# Brings up: postgres, redis, api, worker, blockchain, (optional) web, admin
+#
+# Usage (local dev):
+#   1. cp .env.example .env   (fill real values)
+#   2. docker compose up -d postgres redis
+#   3. docker compose up -d api worker blockchain
+#   4. (optional) docker compose up -d web admin
+#
+# Health endpoints:
+#   - api          http://localhost:4000/api/health
+#   - worker       http://localhost:4001/health
+#   - blockchain   http://localhost:4002/health
+#   - postgres     localhost:5432
+#   - redis        localhost:6379
+# ============================================================================
+name: ai-wealth
+
+services:
+  # ---------- Postgres ----------
+  postgres:
+    image: postgres:16.4-alpine
+    container_name: aiwealth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aiwealth}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aiwealth_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aiwealth}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-aiwealth} -d ${POSTGRES_DB:-aiwealth}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------- Redis ----------
+  redis:
+    image: redis:7.4-alpine
+    container_name: aiwealth-redis
+    restart: unless-stopped
+    command:
+      [
+        'redis-server',
+        '--appendonly',
+        'yes',
+        '--maxmemory',
+        '256mb',
+        '--maxmemory-policy',
+        'allkeys-lru',
+      ]
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------- API (NestJS) ----------
+  api:
+    build:
+      context: ..
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: aiwealth-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aiwealth}:${POSTGRES_PASSWORD:-aiwealth_password}@postgres:5432/${POSTGRES_DB:-aiwealth}?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-3600s}
+      API_PORT: 4000
+      API_PREFIX: api
+      WEB_APP_URL: ${WEB_APP_URL:-http://localhost:3000}
+      ADMIN_APP_URL: ${ADMIN_APP_URL:-http://localhost:3001}
+    ports:
+      - '4000:4000'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ---------- Worker (BullMQ) ----------
+  worker:
+    build:
+      context: ..
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: aiwealth-worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      WORKER_PORT: 4001
+    ports:
+      - '4001:4001'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ---------- Blockchain listener (P0 placeholder) ----------
+  blockchain:
+    build:
+      context: ..
+      dockerfile: infrastructure/docker/Dockerfile.blockchain
+    container_name: aiwealth-blockchain
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      BLOCKCHAIN_PORT: 4002
+    ports:
+      - '4002:4002'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ---------- DApp (Next.js) ----------
+  web:
+    build:
+      context: ..
+      dockerfile: infrastructure/docker/Dockerfile.web
+    container_name: aiwealth-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000/api}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      PORT: 3000
+    ports:
+      - '3000:3000'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ---------- Admin (Vite + Nginx) ----------
+  admin:
+    build:
+      context: ..
+      dockerfile: infrastructure/docker/Dockerfile.admin
+    container_name: aiwealth-admin
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - '3001:80'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1/']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres_data:
+    name: aiwealth_postgres_data
+  redis_data:
+    name: aiwealth_redis_data

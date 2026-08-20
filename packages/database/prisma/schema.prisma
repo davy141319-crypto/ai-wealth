@@ -1,0 +1,45 @@
+// ============================================================================
+// AI Wealth DApp — Prisma schema (P0 foundation)
+// ----------------------------------------------------------------------------
+// P0 intentionally defines NO business tables. Future modules (User, Wallet,
+// Product, Ledger, Transaction, Audit, Idempotency, Versioning, Settlement,
+// Commission, Team, Task, Withdrawal, RiskFlag, ...) will be added here in
+// subsequent phases and validated on a test network first.
+//
+// CONVENTION — unified time handling (applies to EVERY future model):
+//   createdAt DateTime @default(now())   @map("created_at")
+//   updatedAt DateTime @updatedAt        @map("updated_at")
+//   - @default(now())  => set once by Postgres at INSERT
+//   - @updatedAt       => auto-refreshed by a Postgres trigger Prisma emits
+//   - @map(...) keeps TS fields camelCase while DB columns stay snake_case
+// This is the single, consistent rule for created_at / updated_at across the
+// whole system — do not set these manually in application code.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// INFRASTRUCTURE-ONLY table (NOT a business table).
+// A generic key-value store used for migration markers, idempotency keys,
+// versioning, and feature flags. It exists in P0 solely so that:
+//   - `prisma generate` produces a usable client, and
+//   - the created_at / updated_at convention below is demonstrable.
+// Real business models (Ledger, Transaction, User, Product, ...) arrive in
+// later phases and MUST reuse this exact timestamp convention.
+// ----------------------------------------------------------------------------
+model SystemMeta {
+  key       String   @id
+  value     String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  @@map("system_meta")
+}

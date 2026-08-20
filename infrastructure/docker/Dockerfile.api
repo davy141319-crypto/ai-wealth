@@ -1,0 +1,50 @@
+# ============================================================================
+# AI Wealth — NestJS API image (multi-stage)
+# Strategy: full install in builder, copy built dist + production deps to runner
+# ============================================================================
+FROM node:20.18-alpine AS base
+RUN apk add --no-cache libc6-compat openssl tini
+ENV PNPM_HOME=/pnpm
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
+
+# ---------- deps (lockfile-driven install of whole workspace) ----------
+FROM base AS deps
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/config/package.json packages/config/
+COPY packages/database/package.json packages/database/
+COPY packages/ui/package.json packages/ui/
+COPY services/api/package.json services/api/
+RUN pnpm install --frozen-lockfile
+
+# ---------- builder ----------
+FROM base AS builder
+WORKDIR /repo
+COPY --from=deps /repo/node_modules ./node_modules
+COPY --from=deps /repo/packages ./packages
+COPY --from=deps /repo/services ./services
+COPY tsconfig.base.json ./
+COPY packages packages
+COPY services/api services/api
+# Build workspace packages first (api imports @ai-wealth/* dist)
+RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/database --filter @ai-wealth/ui run build
+RUN pnpm --filter @ai-wealth/api run build
+# Prune dev deps so runtime image stays slim
+RUN pnpm --filter @ai-wealth/api deploy --prod /deploy/api
+
+# ---------- runtime ----------
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=4000
+RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001 -G nodejs
+# `pnpm deploy` outputs a self-contained directory with node_modules
+COPY --from=builder /deploy/api ./
+USER nestjs
+EXPOSE 4000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/main.js"]

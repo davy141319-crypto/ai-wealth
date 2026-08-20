@@ -1,0 +1,53 @@
+# ============================================================================
+# AI Wealth — Next.js (DApp) image
+# Uses Next.js `output: 'standalone'` to ship a minimal self-contained app.
+# ============================================================================
+FROM node:20.18-alpine AS base
+RUN apk add --no-cache libc6-compat openssl tini
+ENV PNPM_HOME=/pnpm
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
+
+FROM base AS deps
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/config/package.json packages/config/
+COPY packages/ui/package.json packages/ui/
+COPY apps/web/package.json apps/web/
+RUN pnpm install --frozen-lockfile
+
+FROM base AS builder
+WORKDIR /repo
+COPY --from=deps /repo/node_modules ./node_modules
+COPY --from=deps /repo/packages ./packages
+COPY --from=deps /repo/apps ./apps
+COPY tsconfig.base.json ./
+COPY packages packages
+COPY apps/web apps/web
+# Workspace packages that web depends on (transpiled in Next build)
+RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/ui run build
+# Next.js standalone build (writes .next/standalone, .next/static).
+# `NEXT_OUTPUT_STANDALONE=true` enables `output: 'standalone'` in next.config.js.
+# This is Linux-only — Windows host builds skip standalone (symlink EPERM).
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_OUTPUT_STANDALONE=true
+RUN pnpm --filter @ai-wealth/web run build
+
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001 -G nodejs
+# Copy standalone server bundle
+COPY --from=builder --chown=nextjs:nodejs /repo/apps/web/.next/standalone ./
+# Static assets (must be served from .next/static and public)
+COPY --from=builder --chown=nextjs:nodejs /repo/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=nextjs:nodejs /repo/apps/web/public ./apps/web/public
+USER nextjs
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "apps/web/server.js"]

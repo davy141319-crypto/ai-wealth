@@ -1,0 +1,12 @@
+# ============================================================================
+# AI Wealth — Edge Nginx reverse proxy image
+# Used in production (TLS termination + routing). Local dev in P0 typically
+# talks to per-service ports directly; this image is provided for parity.
+# ============================================================================
+FROM nginx:1.27-alpine
+RUN apk add --no-cache openssl
+COPY infrastructure/nginx/nginx.conf /etc/nginx/nginx.conf
+# SSL certs are mounted at runtime from /etc/nginx/ssl; never bundled.
+EXPOSE 80 443
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1/ || exit 1

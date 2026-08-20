@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  // Disable incremental for production builds — nest build's `deleteOutDir`
+  // removes dist/ but the .tsbuildinfo cache could then cause silent no-ops
+  // where `tsc` thinks nothing changed. Force a full emit every build.
+  "compilerOptions": {
+    "incremental": false
+  },
+  "exclude": ["node_modules", "test", "dist", "**/*.spec.ts", "**/*.e2e-spec.ts"]
+}

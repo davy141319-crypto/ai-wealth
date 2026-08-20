@@ -1,0 +1,41 @@
+{
+  "name": "@ai-wealth/admin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Wealth Admin (Vite + React + Ant Design Pro components + React Router + ECharts).",
+  "scripts": {
+    "dev": "vite --port 3001",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview --port 3001",
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest --passWithNoTests"
+  },
+  "dependencies": {
+    "@ai-wealth/config": "workspace:*",
+    "@ai-wealth/shared": "workspace:*",
+    "@ai-wealth/ui": "workspace:*",
+    "@ant-design/icons": "^5.5.1",
+    "@ant-design/pro-components": "^2.8.2",
+    "antd": "^5.21.0",
+    "axios": "^1.7.7",
+    "echarts": "^5.5.1",
+    "echarts-for-react": "^3.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "eslint": "^8.57.1",
+    "eslint-plugin-react": "^7.37.2",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "vite": "^5.4.10"
+  }
+}

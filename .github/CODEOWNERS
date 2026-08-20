@@ -1,0 +1,29 @@
+# AI Wealth — CODEOWNERS
+# Reviewers automatically requested on PRs touching these paths.
+#
+# Format: <path>  @<user/team>
+
+# Root infra + workspace
+/                          @ai-wealth/infra
+
+# Shared packages (shared contracts: error codes, api response, logger)
+/packages/shared/          @ai-wealth/backend
+/packages/config/          @ai-wealth/backend
+/packages/database/        @ai-wealth/db
+
+# Services
+/services/api/             @ai-wealth/backend
+/services/worker/           @ai-wealth/backend
+/services/blockchain/      @ai-wealth/web3
+
+# Apps
+/apps/web/                 @ai-wealth/frontend
+/apps/admin/               @ai-wealth/frontend
+
+# Infrastructure
+/infrastructure/           @ai-wealth/infra
+/docker-compose.yml        @ai-wealth/infra
+/.github/                  @ai-wealth/infra
+
+# Documentation
+/docs/                     @ai-wealth/docs

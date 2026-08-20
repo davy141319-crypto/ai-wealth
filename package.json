@@ -1,0 +1,48 @@
+{
+  "name": "ai-wealth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Wealth DApp — production-grade monorepo (P0 foundation).",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.23.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "root:install": "pnpm install",
+    "clean": "pnpm -r exec rimraf dist .turbo .next coverage && rimraf node_modules",
+    "lint": "pnpm -r run lint",
+    "build:packages": "pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/database --filter @ai-wealth/ui run build",
+    "typecheck": "pnpm run build:packages && pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "build": "pnpm -r run build",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,md,yml,yaml}": "prettier --write"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "esbuild",
+      "@swc/core",
+      "sharp"
+    ]
+  }
+}
