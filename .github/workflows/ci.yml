@@ -157,16 +157,21 @@ jobs:
             exit 1
           fi
           echo "OK: no .env files are tracked."
-      - name: Verify no plaintext private keys / mnemonics
+      - name: Verify no plaintext private keys in source files
         run: |
-          if grep -rE 'BEGIN (RSA|EC|OPENSSH|PRIVATE) PRIVATE KEY|mnemonic|seed phrase|0x[a-fA-F0-9]{64}' \
-              --exclude-dir=node_modules --exclude-dir=.git \
-              --exclude='*.lock' --exclude='pnpm-lock.yaml' \
-              . ; then
-            echo "::error::Potential secret/private key detected in tracked files."
+          # gitleaks (above) scans full history for real secret patterns.
+          # This is a focused guard against PEM private-key blocks and raw
+          # 64-hex private keys committed directly in source code. We scope
+          # the scan to source file types so that prose in docs/configs that
+          # merely *mentions* "mnemonic"/"private key" does not false-positive.
+          if git grep -nE -- \
+              '-----BEGIN [A-Z ]*PRIVATE KEY-----|0x[a-fA-F0-9]{64}' \
+              -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' \
+                 '*.json' '*.py' '*.go' '*.rs' '*.sql' ; then
+            echo "::error::Plaintext private key / raw hex key detected in source files."
             exit 1
           fi
-          echo "OK: no plaintext secrets detected."
+          echo "OK: no plaintext private keys detected in source files."
 
   # --------------------------------------------------------- docker compose --
   docker-build:
