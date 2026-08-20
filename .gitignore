@@ -34,7 +34,16 @@ secrets/
 private/
 *.seed
 seed-phrase*
-wallet-*
+# Wallet secret files only (NOT source files like wallet.repository.ts).
+# Match wallet-key/seed/priv files by extension + keyword.
+wallet-*.json
+wallet-*.key
+wallet-*.pem
+wallet-*.txt
+wallet-*.seed
+wallet-seed*
+wallet-private*
+wallet-keystore*
 keystore/*
 keystore.json
 mnemonic*
