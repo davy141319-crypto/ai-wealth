@@ -1,14 +1,17 @@
 # ============================================================================
 # AI Wealth — Admin (Vite + React + AntD Pro) image
 # Static SPA build served by Nginx in production.
+# Install + build happen in ONE stage so pnpm's node_modules/.bin symlinks
+# are never carried across a `COPY --from` boundary.
 # ============================================================================
 FROM node:20.18-alpine AS base
 RUN apk add --no-cache libc6-compat openssl tini
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
+RUN npm install -g pnpm@10.23.0
 
-FROM base AS deps
+# ---------- builder (install + build in the same stage) ----------
+FROM base AS builder
 WORKDIR /repo
 COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
 COPY packages/shared/package.json packages/shared/
@@ -16,19 +19,13 @@ COPY packages/config/package.json packages/config/
 COPY packages/ui/package.json packages/ui/
 COPY apps/admin/package.json apps/admin/
 RUN pnpm install --frozen-lockfile
-
-FROM base AS builder
-WORKDIR /repo
-COPY --from=deps /repo/node_modules ./node_modules
-COPY --from=deps /repo/packages ./packages
-COPY --from=deps /repo/apps ./apps
 COPY tsconfig.base.json ./
 COPY packages packages
 COPY apps/admin apps/admin
 RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/ui run build
 RUN pnpm --filter @ai-wealth/admin run build
 
-# Build-time nginx config for SPA fallback
+# ---------- runtime (nginx serves the built SPA) ----------
 FROM nginx:1.27-alpine AS runner
 RUN addgroup -g 1001 -S nginxx && adduser -S admin -u 1001 -G nginxx
 COPY --from=builder /repo/apps/admin/dist /usr/share/nginx/html

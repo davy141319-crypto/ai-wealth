@@ -1,14 +1,18 @@
 # ============================================================================
 # AI Wealth — Next.js (DApp) image
-# Uses Next.js `output: 'standalone'` to ship a minimal self-contained app.
+# Install + build happen in ONE stage so pnpm's node_modules/.bin symlinks
+# are never carried across a `COPY --from` boundary. Uses Next.js
+# `output: 'standalone'` (enabled via NEXT_OUTPUT_STANDALONE=true) to ship a
+# minimal self-contained app.
 # ============================================================================
 FROM node:20.18-alpine AS base
 RUN apk add --no-cache libc6-compat openssl tini
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
+RUN npm install -g pnpm@10.23.0
 
-FROM base AS deps
+# ---------- builder (install + build in the same stage) ----------
+FROM base AS builder
 WORKDIR /repo
 COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
 COPY packages/shared/package.json packages/shared/
@@ -16,12 +20,6 @@ COPY packages/config/package.json packages/config/
 COPY packages/ui/package.json packages/ui/
 COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile
-
-FROM base AS builder
-WORKDIR /repo
-COPY --from=deps /repo/node_modules ./node_modules
-COPY --from=deps /repo/packages ./packages
-COPY --from=deps /repo/apps ./apps
 COPY tsconfig.base.json ./
 COPY packages packages
 COPY apps/web apps/web
@@ -34,6 +32,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_OUTPUT_STANDALONE=true
 RUN pnpm --filter @ai-wealth/web run build
 
+# ---------- runtime ----------
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
