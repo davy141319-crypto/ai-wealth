@@ -1,51 +1,52 @@
 # ============================================================================
-# AI Wealth — NestJS API image (multi-stage)
-# Install + build happen in ONE stage so pnpm's node_modules/.bin symlinks
-# (tsc, prisma, …) are never carried across a `COPY --from` boundary, which
-# breaks bin resolution under buildkit. The prod deploy dir is the only
-# artifact copied into the runtime stage.
+# AI Wealth — NestJS API image
+# Single-stage: install + build + run in ONE stage. This avoids carrying
+# pnpm's node_modules/.bin symlinks across a `COPY --from` stage boundary
+# (which broke `tsc`/`prisma` resolution under buildkit) and avoids the
+# pnpm v10 `pnpm deploy` inject-workspace-packages requirement.
+# Only the workspace manifests this service actually depends on are copied,
+# so `pnpm install` resolves a scoped dependency tree (not the whole workspace).
+# P0 keeps devDependencies in the image for robustness; a slim prod prune is
+# a P1+ hardening task (blocked by Prisma client generation under --prod).
 # ============================================================================
-FROM node:20.18-alpine AS base
+FROM node:20.18-alpine
 RUN apk add --no-cache libc6-compat openssl tini
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
 RUN npm install -g pnpm@10.23.0
 
-# ---------- builder (install + build in the same stage) ----------
-FROM base AS builder
-WORKDIR /repo
-# Copy workspace manifests + lockfile first so this layer is cached by buildx
-# and only invalidated when dependencies change.
+WORKDIR /app
+# Copy only the manifests of the packages this service depends on, so the
+# install layer is scoped (api → shared, config, database) and cacheable.
 COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/config/package.json packages/config/
 COPY packages/database/package.json packages/database/
-COPY packages/ui/package.json packages/ui/
 COPY services/api/package.json services/api/
-# Install in-place — node_modules/.bin symlinks stay valid for the build below.
 RUN pnpm install --frozen-lockfile
+
 # Overlay source on top of the installed workspace (COPY merges dirs, so the
 # node_modules/ created above inside each package is preserved).
 COPY tsconfig.base.json ./
 COPY packages packages
 COPY services/api services/api
-# Build workspace packages first (api imports @ai-wealth/* dist)
-RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/database --filter @ai-wealth/ui run build
-RUN pnpm --filter @ai-wealth/api run build
-# Prune dev deps so runtime image stays slim
-RUN pnpm --filter @ai-wealth/api deploy --prod /deploy/api
 
-# ---------- runtime ----------
-FROM base AS runner
-WORKDIR /app
+# Build workspace packages the api imports, then the api itself. The database
+# build script runs `prisma generate && tsc`, which generates the Prisma client
+# into node_modules for runtime use.
+RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/database run build
+RUN pnpm --filter @ai-wealth/api run build
+# Ensure the Prisma client is present for runtime (idempotent).
+RUN pnpm --filter @ai-wealth/database exec prisma generate
+
+# Non-root runtime user
+RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001 -G nodejs
+USER nestjs
+
 ENV NODE_ENV=production
 ENV PORT=4000
-RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001 -G nodejs
-# `pnpm deploy` outputs a self-contained directory with node_modules
-COPY --from=builder /deploy/api ./
-USER nestjs
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/main.js"]
+CMD ["node", "services/api/dist/main.js"]
