@@ -221,24 +221,44 @@ jobs:
 
   # ----------------------------------------------------- required gate job --
   # A status check that PRs can require as a single "CI passed" gate.
+  # NOTE: GitHub Actions expressions `${{ }}` do NOT support bash variable
+  # interpolation inside them (e.g. `${{ needs[$r].result }}` is invalid and
+  # makes the whole workflow file fail to parse). We materialize each needed
+  # job's result into a shell env var, then inspect them in bash.
   ci-pass:
     name: CI passed (gate)
     runs-on: ubuntu-latest
     needs: [lint, typecheck, test, build, secret-scan, docker-build]
     if: always()
+    env:
+      LINT_RESULT: ${{ needs.lint.result }}
+      TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+      TEST_RESULT: ${{ needs.test.result }}
+      BUILD_RESULT: ${{ needs.build.result }}
+      SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+      DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
     steps:
       - name: Aggregate results
         run: |
-          echo "lint=${{ needs.lint.result }}"
-          echo "typecheck=${{ needs.typecheck.result }}"
-          echo "test=${{ needs.test.result }}"
-          echo "build=${{ needs.build.result }}"
-          echo "secret-scan=${{ needs.secret-scan.result }}"
-          echo "docker-build=${{ needs.docker-build.result }}"
-          for r in lint typecheck test build secret-scan docker-build; do
-            if [ "${{ needs[$r].result }}" != "success" ]; then
-              echo "::error::Job $r did not succeed (status: ${{ needs[$r].result }})"
-              exit 1
+          # bash associative array: job name -> its needs[].result
+          declare -A results=(
+            [lint]="$LINT_RESULT"
+            [typecheck]="$TYPECHECK_RESULT"
+            [test]="$TEST_RESULT"
+            [build]="$BUILD_RESULT"
+            [secret-scan]="$SECRET_SCAN_RESULT"
+            [docker-build]="$DOCKER_BUILD_RESULT"
+          )
+          failed=0
+          for r in "${!results[@]}"; do
+            status="${results[$r]}"
+            echo "$r=$status"
+            if [ "$status" != "success" ]; then
+              echo "::error::Job $r did not succeed (status: $status)"
+              failed=1
             fi
           done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
           echo "All CI jobs passed."
