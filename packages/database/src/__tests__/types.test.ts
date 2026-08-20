@@ -1,9 +1,4 @@
-import {
-  normalizePagination,
-  DEFAULT_PAGE,
-  DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
-} from '../types';
+import { normalizePagination, DEFAULT_PAGE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '../types';
 
 describe('normalizePagination', () => {
   it('applies defaults when input is empty', () => {

@@ -6,11 +6,7 @@
 
 import { Prisma, type User, type UserStatus } from '@prisma/client';
 import { prisma } from '../client';
-import {
-  normalizePagination,
-  type PaginationInput,
-  type SortDirection,
-} from '../types';
+import { normalizePagination, type PaginationInput, type SortDirection } from '../types';
 
 export interface UserCreateInput {
   status?: UserStatus;

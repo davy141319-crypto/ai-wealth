@@ -9,17 +9,9 @@
 //   4. fail(): set status=FAILED so the client can retry with the same key.
 // ============================================================================
 
-import {
-  Prisma,
-  type IdempotencyKey,
-  type IdempotencyStatus,
-} from '@prisma/client';
+import { Prisma, type IdempotencyKey, type IdempotencyStatus } from '@prisma/client';
 import { prisma } from '../client';
-import {
-  normalizePagination,
-  type PaginationInput,
-  type SortDirection,
-} from '../types';
+import { normalizePagination, type PaginationInput, type SortDirection } from '../types';
 
 export interface IdempotencyKeyCreateInput {
   key: string;

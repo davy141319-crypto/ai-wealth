@@ -23,12 +23,8 @@ const prisma = new PrismaClient();
 function assertTestOnly(): void {
   const url = process.env.DATABASE_URL ?? '';
   const isLocal =
-    url.includes('localhost') ||
-    url.includes('127.0.0.1') ||
-    url.includes('postgres:5432'); // docker-compose internal host (local dev)
-  const isTestEnv =
-    process.env.NODE_ENV !== 'production' &&
-    process.env.NODE_ENV !== 'staging';
+    url.includes('localhost') || url.includes('127.0.0.1') || url.includes('postgres:5432'); // docker-compose internal host (local dev)
+  const isTestEnv = process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'staging';
 
   if (!isLocal && !isTestEnv) {
     throw new Error(

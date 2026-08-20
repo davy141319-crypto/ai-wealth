@@ -16,9 +16,7 @@ import { Repositories } from '../repositories';
 
 const dbUrl = process.env.DATABASE_URL ?? '';
 const isLocalDb =
-  dbUrl.includes('localhost') ||
-  dbUrl.includes('127.0.0.1') ||
-  dbUrl.includes('postgres:5432');
+  dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('postgres:5432');
 
 const describeIntegration = isLocalDb ? describe : describe.skip;
 
@@ -52,8 +50,12 @@ afterEach(async () => {
     await prisma.auditLog.deleteMany({ where: { id } }).catch(() => {});
   }
   // auth_nonces / wallet_identities cascade with their wallet.
-  await prisma.authNonce.deleteMany({ where: { walletId: { in: createdWallets } } }).catch(() => {});
-  await prisma.walletIdentity.deleteMany({ where: { walletId: { in: createdWallets } } }).catch(() => {});
+  await prisma.authNonce
+    .deleteMany({ where: { walletId: { in: createdWallets } } })
+    .catch(() => {});
+  await prisma.walletIdentity
+    .deleteMany({ where: { walletId: { in: createdWallets } } })
+    .catch(() => {});
   await prisma.wallet.deleteMany({ where: { id: { in: createdWallets } } }).catch(() => {});
   await prisma.auditLog.deleteMany({ where: { actor: { in: createdUsers } } }).catch(() => {});
   await prisma.user.deleteMany({ where: { id: { in: createdUsers } } }).catch(() => {});

@@ -7,11 +7,7 @@
 
 import { Prisma, type Chain, type Wallet, type WalletStatus } from '@prisma/client';
 import { prisma } from '../client';
-import {
-  normalizePagination,
-  type PaginationInput,
-  type SortDirection,
-} from '../types';
+import { normalizePagination, type PaginationInput, type SortDirection } from '../types';
 
 export interface WalletCreateInput {
   userId: string;

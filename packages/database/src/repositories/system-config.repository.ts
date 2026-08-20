@@ -5,17 +5,9 @@
 // here, so this repository stays a thin data-access object.
 // ============================================================================
 
-import {
-  Prisma,
-  type SystemConfig,
-  type SystemConfigValueType,
-} from '@prisma/client';
+import { Prisma, type SystemConfig, type SystemConfigValueType } from '@prisma/client';
 import { prisma } from '../client';
-import {
-  normalizePagination,
-  type PaginationInput,
-  type SortDirection,
-} from '../types';
+import { normalizePagination, type PaginationInput, type SortDirection } from '../types';
 
 export interface SystemConfigUpsertInput {
   key: string;
