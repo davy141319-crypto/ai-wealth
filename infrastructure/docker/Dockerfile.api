@@ -1,32 +1,31 @@
 # ============================================================================
 # AI Wealth — NestJS API image (multi-stage)
-# Strategy: full install in builder, copy built dist + production deps to runner
+# Install + build happen in ONE stage so pnpm's node_modules/.bin symlinks
+# (tsc, prisma, …) are never carried across a `COPY --from` boundary, which
+# breaks bin resolution under buildkit. The prod deploy dir is the only
+# artifact copied into the runtime stage.
 # ============================================================================
 FROM node:20.18-alpine AS base
 RUN apk add --no-cache libc6-compat openssl tini
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
-# Hoisted node-linker ensures project bins (tsc, prisma) resolve in Docker builds
-ENV npm_config_node_linker=hoisted
 RUN npm install -g pnpm@10.23.0
 
-# ---------- deps (lockfile-driven install of whole workspace) ----------
-FROM base AS deps
+# ---------- builder (install + build in the same stage) ----------
+FROM base AS builder
 WORKDIR /repo
+# Copy workspace manifests + lockfile first so this layer is cached by buildx
+# and only invalidated when dependencies change.
 COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/config/package.json packages/config/
 COPY packages/database/package.json packages/database/
 COPY packages/ui/package.json packages/ui/
 COPY services/api/package.json services/api/
+# Install in-place — node_modules/.bin symlinks stay valid for the build below.
 RUN pnpm install --frozen-lockfile
-
-# ---------- builder ----------
-FROM base AS builder
-WORKDIR /repo
-COPY --from=deps /repo/node_modules ./node_modules
-COPY --from=deps /repo/packages ./packages
-COPY --from=deps /repo/services ./services
+# Overlay source on top of the installed workspace (COPY merges dirs, so the
+# node_modules/ created above inside each package is preserved).
 COPY tsconfig.base.json ./
 COPY packages packages
 COPY services/api services/api

@@ -1,27 +1,22 @@
 # ============================================================================
 # AI Wealth — Blockchain Listener image (multi-stage, P0 placeholder)
+# Install + build happen in ONE stage so pnpm's node_modules/.bin symlinks
+# are never carried across a `COPY --from` boundary.
 # ============================================================================
 FROM node:20.18-alpine AS base
 RUN apk add --no-cache libc6-compat openssl tini
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
-# Hoisted node-linker ensures project bins (tsc, prisma) resolve in Docker builds
-ENV npm_config_node_linker=hoisted
 RUN npm install -g pnpm@10.23.0
 
-FROM base AS deps
+# ---------- builder (install + build in the same stage) ----------
+FROM base AS builder
 WORKDIR /repo
 COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/config/package.json packages/config/
 COPY services/blockchain/package.json services/blockchain/
 RUN pnpm install --frozen-lockfile
-
-FROM base AS builder
-WORKDIR /repo
-COPY --from=deps /repo/node_modules ./node_modules
-COPY --from=deps /repo/packages ./packages
-COPY --from=deps /repo/services ./services
 COPY tsconfig.base.json ./
 COPY packages packages
 COPY services/blockchain services/blockchain
@@ -29,6 +24,7 @@ RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config run build
 RUN pnpm --filter @ai-wealth/blockchain run build
 RUN pnpm --filter @ai-wealth/blockchain deploy --prod /deploy/blockchain
 
+# ---------- runtime ----------
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
