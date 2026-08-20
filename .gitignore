@@ -13,6 +13,9 @@ out/
 # Coverage
 coverage/
 
+# Local-only pnpm config (sandbox store/cache paths) — NEVER commit
+.npmrc.local
+
 # Environment files — NEVER commit secrets
 .env
 .env.local

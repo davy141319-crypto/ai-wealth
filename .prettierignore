@@ -9,3 +9,9 @@ pnpm-lock.yaml
 package-lock.json
 *.tsbuildinfo
 migrations
+
+# pnpm store / cache (never format dependency metadata)
+.pnpm-store
+.pnpm
+**/.local/state/pnpm
+pnpm-store
