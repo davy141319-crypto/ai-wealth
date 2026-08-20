@@ -170,7 +170,7 @@ jobs:
 
   # --------------------------------------------------------- docker compose --
   docker-build:
-    name: Build Docker images (api, worker, blockchain)
+    name: Build all Docker images (api, worker, blockchain, web, admin, nginx)
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -197,6 +197,27 @@ jobs:
           file: infrastructure/docker/Dockerfile.blockchain
           push: false
           tags: ai-wealth/blockchain:ci
+      - name: Build Web (Next.js DApp) image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.web
+          push: false
+          tags: ai-wealth/web:ci
+      - name: Build Admin image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.admin
+          push: false
+          tags: ai-wealth/admin:ci
+      - name: Build Edge Nginx image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.nginx
+          push: false
+          tags: ai-wealth/nginx:ci
 
   # ----------------------------------------------------- required gate job --
   # A status check that PRs can require as a single "CI passed" gate.

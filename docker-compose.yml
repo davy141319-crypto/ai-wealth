@@ -68,7 +68,7 @@ services:
   # ---------- API (NestJS) ----------
   api:
     build:
-      context: ..
+      context: .
       dockerfile: infrastructure/docker/Dockerfile.api
     container_name: aiwealth-api
     restart: unless-stopped
@@ -105,7 +105,7 @@ services:
   # ---------- Worker (BullMQ) ----------
   worker:
     build:
-      context: ..
+      context: .
       dockerfile: infrastructure/docker/Dockerfile.worker
     container_name: aiwealth-worker
     restart: unless-stopped
@@ -135,7 +135,7 @@ services:
   # ---------- Blockchain listener (P0 placeholder) ----------
   blockchain:
     build:
-      context: ..
+      context: .
       dockerfile: infrastructure/docker/Dockerfile.blockchain
     container_name: aiwealth-blockchain
     restart: unless-stopped
@@ -164,7 +164,7 @@ services:
   # ---------- DApp (Next.js) ----------
   web:
     build:
-      context: ..
+      context: .
       dockerfile: infrastructure/docker/Dockerfile.web
     container_name: aiwealth-web
     restart: unless-stopped
@@ -194,7 +194,7 @@ services:
   # ---------- Admin (Vite + Nginx) ----------
   admin:
     build:
-      context: ..
+      context: .
       dockerfile: infrastructure/docker/Dockerfile.admin
     container_name: aiwealth-admin
     restart: unless-stopped
@@ -209,6 +209,33 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # ---------- Edge Nginx (TLS termination + routing) ----------
+  nginx:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.nginx
+    container_name: aiwealth-nginx
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+    ports:
+      - '${NGINX_HTTP_PORT:-8080}:80'
+      - '${NGINX_HTTPS_PORT:-8443}:443'
+    volumes:
+      # Mount real TLS certs in production (never bundled into the image)
+      - ./infrastructure/nginx/ssl:/etc/nginx/ssl:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1/']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   postgres_data:
