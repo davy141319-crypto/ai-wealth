@@ -4,7 +4,7 @@
 // errors and are mapped by the Service layer.
 // ============================================================================
 
-import { Prisma, type User, type UserStatus } from '@prisma/client';
+import { Prisma, type User, type UserRole, type UserStatus } from '@prisma/client';
 import { prisma } from '../client';
 import { normalizePagination, type PaginationInput, type SortDirection } from '../types';
 
@@ -16,6 +16,21 @@ export interface UserCreateInput {
 export interface UserUpdateInput {
   status?: UserStatus;
   lastLoginAt?: Date | null;
+}
+
+/**
+ * P1-006 — Authorization projection (role + status) used by RolesGuard.
+ * Deliberately read-only and role-mutation-free: there is NO setRole /
+ * updateRole method on this repository, and `UserUpdateInput` does NOT expose
+ * `role`. Admin role changes happen only via the controlled provisioning SQL
+ * transaction defined in the P1-006 spec (out of application-code scope).
+ *
+ * A single DB query returns both fields so RolesGuard reads authorization
+ * context in ONE round-trip per request (no double lookup).
+ */
+export interface AuthorizationContext {
+  role: UserRole;
+  status: UserStatus;
 }
 
 export interface UserListOptions extends PaginationInput {
@@ -51,6 +66,21 @@ export class UserRepository {
         wallets: opts.includeWallets ?? false,
         auditLogs: opts.includeAuditLogs ?? false,
       },
+    });
+  }
+
+  /**
+   * P1-006 — Authorization context projection (role + status) in a SINGLE DB
+   * query. Used by RolesGuard to make per-request authorization decisions live
+   * from the DB (never from the JWT). Returns `null` when the user does not
+   * exist; RolesGuard treats null as AUTHZ_USER_NOT_FOUND (fail-closed 403).
+   *
+   * Role mutation is intentionally NOT exposed here. See AuthorizationContext.
+   */
+  getAuthorizationContext(id: string): Promise<AuthorizationContext | null> {
+    return this.db.user.findUnique({
+      where: { id },
+      select: { role: true, status: true },
     });
   }
 

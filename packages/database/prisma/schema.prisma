@@ -47,6 +47,17 @@ enum UserStatus {
   CLOSED
 }
 
+/// P1-006 — Backend RBAC roles. Only two values by design (default-deny,
+/// least-privilege): higher tiers (SUPER_ADMIN / OPERATOR / FINANCE / etc.)
+/// are intentionally absent. Role is read live from DB on every admin request
+/// (never carried in the JWT) so privilege changes take effect immediately.
+/// No @@map: physical type name follows Prisma default (UserRole), matching
+/// the existing UserStatus convention.
+enum UserRole {
+  USER
+  ADMIN
+}
+
 /// Supported blockchain identifiers. Extend carefully; new chains require
 /// listener + custody review. No fund fields here — chain is identity only.
 enum Chain {
@@ -91,6 +102,10 @@ enum SystemConfigValueType {
 model User {
   id          String     @id @default(uuid()) @db.Uuid
   status      UserStatus @default(ACTIVE)
+  // P1-006 — Backend RBAC. Default USER (least privilege). Mutation is NOT
+  // exposed via UserUpdateInput / HTTP — admin role changes happen only through
+  // the controlled provisioning SQL transaction (see spec provisioning contract).
+  role        UserRole   @default(USER)
   lastLoginAt DateTime?  @map("last_login_at")
 
   createdAt DateTime @default(now()) @map("created_at")

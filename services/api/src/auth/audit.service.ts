@@ -11,7 +11,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { keccak256, toHex } from 'viem';
-import { AuditAction, AuthFailReason, createLogger } from '@ai-wealth/shared';
+import { AuditAction, AuthFailReason, AuthzFailReason, createLogger } from '@ai-wealth/shared';
 import { Repositories } from '@ai-wealth/database';
 import { SERVICE_NAMES } from '@ai-wealth/config';
 
@@ -222,10 +222,56 @@ export class AuditService {
     });
   }
 
+  // --------------------------------------------------------------------------
+  // P1-006 — Backend RBAC decision audit (ADDITIVE only).
+  // Existing methods and write() default semantics are NOT modified. The
+  // write() `resource` field defaults to 'auth' so all pre-existing auth
+  // audit rows keep resource='auth' (zero behavior change); RBAC decisions
+  // pass an explicit resource (e.g. 'admin/me').
+  // --------------------------------------------------------------------------
+
+  /**
+   * Record a per-request RBAC decision. `reason` (AuthzFailReason) is the only
+   * metadata — resource is a top-level AuditLog column, NOT duplicated into
+   * metadata. Sensitive values (token/cookie/wallet) are never written.
+   * As with all audit writes, failure is non-blocking: RolesGuard wraps calls
+   * in `.catch(() => {})` so an audit DB outage cannot change the authz result.
+   */
+  recordAuthzDecision(params: {
+    userId?: string | null;
+    decision: 'ALLOWED' | 'DENIED';
+    reason?: AuthzFailReason | string;
+    resource: string;
+    requestId?: string | null;
+    ip?: string | null;
+    userAgent?: string | null;
+  }): Promise<void> {
+    const action =
+      params.decision === 'ALLOWED'
+        ? AuditAction.AUTHZ_DECISION_ALLOWED
+        : AuditAction.AUTHZ_DECISION_DENIED;
+    return this.write(action, {
+      actor: params.userId ?? null,
+      resource: params.resource,
+      requestId: params.requestId ?? null,
+      ip: params.ip ?? null,
+      userAgent: params.userAgent ?? null,
+      // Minimal metadata: ONLY the reasonCode. No resource duplication, no
+      // token/cookie/wallet/private data.
+      metadata: { reasonCode: params.reason ?? null },
+      // DENIED is a security failure event; ALLOWED is informational.
+      success: params.decision === 'ALLOWED',
+    });
+  }
+
   /**
    * Append an audit row and await it. Authentication / audit events are
    * always-on by policy so we treat write failure as a logged warning but
    * never throw (login flow must not be impacted).
+   *
+   * P1-006: `resource` is now an optional param (default 'auth') so RBAC
+   * decisions can record their true resource (e.g. 'admin/me') while every
+   * pre-existing auth audit call keeps resource='auth' unchanged.
    */
   private async write(
     action: AuditAction,
@@ -236,11 +282,12 @@ export class AuditService {
       userAgent?: string | null;
       metadata?: unknown;
       success?: boolean;
+      resource?: string;
     },
   ): Promise<void> {
     const input = {
       action,
-      resource: 'auth',
+      resource: params.resource ?? 'auth',
       actor: params.actor ?? null,
       requestId: params.requestId ?? null,
       ip: params.ip ?? null,
