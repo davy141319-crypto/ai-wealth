@@ -1,0 +1,39 @@
+-- P1-002 hotfix — wallets.status default drift repair (additive, no historical edit)
+--
+-- Background:
+--   * P1-001 migration (20260820151744_p1_001_core_models) created `wallets`
+--     with `status "WalletStatus" NOT NULL DEFAULT 'CONNECTED'`.
+--   * P1-002 migration (20260821000000_p1_002_auth_support) header lines 7-8
+--     describe the intent "WalletStatus default switches from CONNECTED ->
+--     DISCONNECTED so newly issued wallets are not implicitly trusted until
+--     SIWE verify binds", but the SQL block (lines 10-20) only alters
+--     `user_id` nullability + the FK + the index and OMITS the `ALTER COLUMN
+--     status SET DEFAULT 'DISCONNECTED'`. The drift is therefore between the
+--     P1-002 migration's own stated contract and what it actually executes.
+--   * The Prisma schema (model Wallet.status) declares
+--     `status WalletStatus @default(DISCONNECTED)`.
+--
+-- Result before this hotfix: a DB built from all migrations has
+-- `wallets.status DEFAULT 'CONNECTED'` while the schema expects
+-- `@default(DISCONNECTED)` -> drift. Newly inserted wallet rows that omit
+-- `status` are implicitly trusted (CONNECTED) before SIWE verify, violating
+-- the P1-002 trust contract.
+--
+-- This hotfix:
+--   1. Adds ONE additive `ALTER TABLE ... SET DEFAULT` only. It does NOT edit
+--      the historical P1-001 / P1-002 migrations (forbidden).
+--   2. Does NOT change existing rows — `SET DEFAULT` only affects future
+--      INSERTs that omit `status`. Existing wallets keep their current status
+--      value (application code, e.g. NonceService, already explicitly writes
+--      'DISCONNECTED' on creation and AuthService promotes to 'CONNECTED' on
+--      verify, so backfilling existing rows is unnecessary and out of scope).
+--   3. Restores schema/migration zero-drift: after this migration a DB built
+--      from all migrations matches `prisma migrate diff --to-schema-datamodel`.
+--
+-- NonceService note: NonceService.issue() always passes `status:
+-- 'DISCONNECTED'` explicitly (services/api/src/auth/nonce.service.ts), so its
+-- runtime behavior is unchanged by this default repair; the default only
+-- protects against future code paths / raw inserts that omit `status`.
+
+-- AlterTable
+ALTER TABLE "wallets" ALTER COLUMN "status" SET DEFAULT 'DISCONNECTED';
