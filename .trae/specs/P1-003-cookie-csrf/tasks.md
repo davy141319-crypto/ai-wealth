@@ -6,7 +6,10 @@ PR base：develop
 Merge：Squash and merge
 
 排除：Refresh Token / Admin RBAC / TRON SIWE / 完整登录 UI / 任何资金业务
-不修改：数据库 / migration / JwtAuthService / SIWE / Nonce / Audit / Repository / 原 T01-T15 断言
+不修改：数据库 / migration / JwtAuthService / SIWE / Nonce / Repository / 原 T01-T15 断言
+Audit 窄豁免（用户批准）：仅允许 AuditService **新增** `recordCsrfFailure`（显式 `success:false`）+ `AUTH_CSRF_FAILURE` 枚举值；禁止改既有 Audit 方法/语义。详见 spec.md「Approved Narrow Exemption」。
+
+Cookie Max-Age 规则（修正）：verify Cookie Max-Age 必须按**已签发 JWT 实际 `exp`** 计算（解码 token payload），禁止按配置 TTL `jwtExpiresIn` 推算；clearAuthCookies 必须同时输出 `Max-Age=0` + `Expires=epoch`。
 
 CSRF 规则：仅在 POST/PUT/PATCH/DELETE 且存在 access cookie 时校验；Bearer-only 无需 CSRF；logout 使用 Cookie 时必须 CSRF。
 
@@ -27,8 +30,8 @@ CSRF 规则：仅在 POST/PUT/PATCH/DELETE 且存在 access cookie 时校验；B
 
 - 修改：`services/api/src/main.ts`（helmet 之后 `app.use(cookieParser())`）
 - 新增：`services/api/src/auth/cookie-auth.service.ts`
-  - `setAuthCookie(res, token, expSec)`：set access cookie（HttpOnly=true, Secure/SameSite/Path/Domain 按 env）
-  - `clearAuthCookies(res)`：清 access + csrf cookie（Max-Age=0, Path=/, HttpOnly）
+  - `setAuthCookie(res, token)`：set access cookie（HttpOnly=true, Secure/SameSite/Path/Domain 按 env）。Max-Age 从已签发 JWT 的 `exp` 解码计算（非配置 TTL）
+  - `clearAuthCookies(res)`：清 access + csrf cookie，同时 Max-Age=0 + Expires=epoch（手动 Set-Cookie 头），Path/Domain 与设置时一致
 - 修改：`services/api/package.json`（+cookie-parser, +@types/cookie-parser）
 - 依赖：P1-003.1
 - 验收：CookieAuthService 可用；cookie 属性按 NODE_ENV 正确；typecheck/lint 通过
@@ -68,11 +71,11 @@ CSRF 规则：仅在 POST/PUT/PATCH/DELETE 且存在 access cookie 时校验；B
   - postLogout：+@Res({passthrough:true}) + CookieAuthService.clearAuthCookies
 - 依赖：P1-003.2, P1-003.3, P1-003.4
 - 验收：
-  - verify 成功 set access cookie（属性正确，Max-Age=jwt exp）
+  - verify 成功 set access cookie（属性正确，Max-Age == 已签发 JWT 实际 `exp`，非配置 TTL）
   - body 仍含 accessToken（Bearer 兼容）
-  - logout 清 access + csrf cookie
+  - logout 清 access + csrf cookie（Max-Age=0 + Expires=epoch）
   - Redis blocklist/session 不变；jwt-auth.service.ts 不改
-- 风险：cookie Max-Age 与 jwt exp 不一致；@Res passthrough 配置错误
+- 风险：cookie Max-Age 与 jwt exp 不一致（已修正：解码实际 exp）；@Res passthrough 配置错误
 
 ## P1-003.6 siwe-client credentials:include + CSRF [P1]
 

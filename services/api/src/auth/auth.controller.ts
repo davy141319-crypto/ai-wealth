@@ -40,8 +40,6 @@ import { NonceQueryDto, NonceResponseDto } from './dto/nonce-query.dto';
 import { MeResponseDto, VerifyRequestDto, VerifyResponseDto } from './dto/verify-request.dto';
 import { CsrfTokenResponseDto } from './dto/csrf-token.dto';
 import { NonceService } from './nonce.service';
-import { parseDurationToSeconds } from './auth.module';
-import { env } from '@ai-wealth/config';
 
 const HEADER_REQUEST_ID = 'x-request-id';
 const HEADER_USER_AGENT = 'user-agent';
@@ -133,10 +131,12 @@ export class AuthController {
     });
     // P1-003: also deliver the token in an HttpOnly cookie for browser
     // sessions. The body keeps `accessToken` for Bearer-mode backward
-    // compatibility. Cookie Max-Age follows the configured JWT TTL (the SIWE
-    // expirationTime may clamp the real exp shorter; an over-stated Max-Age
-    // is harmless — the token itself enforces its own expiry).
-    this.cookieAuth.setAuthCookie(res, result.token, parseDurationToSeconds(env().jwtExpiresIn));
+    // compatibility. CookieAuthService derives Max-Age from the SIGNED JWT's
+    // real `exp` (decoded from the token payload) — NOT from the configured
+    // jwtExpiresIn TTL — so the cookie never outlives the token even when
+    // JwtAuthService clamps exp to a shorter SIWE expirationTime. JwtAuthService
+    // itself is unchanged.
+    this.cookieAuth.setAuthCookie(res, result.token);
     return ok({
       accessToken: result.token,
       user: {

@@ -45,7 +45,7 @@
 
 - 数据库 schema + 所有 migration（P1-001/P1-002 已验收）
 - `services/api/src/auth/jwt-auth.service.ts`（仅复用 sign/verify/revoke，不改内部）
-- `services/api/src/auth/siwe.service.ts`、`nonce.service.ts`、`audit.service.ts`（仅复用）
+- `services/api/src/auth/siwe.service.ts`、`nonce.service.ts`（仅复用；`audit.service.ts` 见下方「Approved Narrow Exemption」窄豁免）
 - `packages/database/src/repositories/*`（已验收）
 - P1-002 原 15 项测试断言（仅追加，不改原有）
 
@@ -60,8 +60,8 @@
 
 - `services/api/src/main.ts` 在 helmet 之后启用 `app.use(cookieParser())`。
 - 新增 `services/api/src/auth/cookie-auth.service.ts`：
-  - `setAuthCookie(res, token, expSec)`：set access cookie（HttpOnly=true, Secure/SameSite/Path/Domain 按 env）。
-  - `clearAuthCookies(res)`：清 access + csrf cookie（Max-Age=0, Path=/, HttpOnly）。
+  - `setAuthCookie(res, token)`：set access cookie（HttpOnly=true, Secure/SameSite/Path/Domain 按 env）。Max-Age 从已签发 JWT 的 `exp` claim 解码计算（非配置 TTL 推算），确保 Cookie 与 token 实际过期同步（含 SIWE expirationTime 更短时 JwtAuthService 已 clamp exp，Cookie 自动跟随）。
+  - `clearAuthCookies(res)`：清 access + csrf cookie，同时输出 `Max-Age=0` + `Expires=epoch`（手动构造 Set-Cookie 头，绕过 Express res.clearCookie 的 maxAge/expires 互斥），Path/Domain 与设置时一致。
 
 ### FR-3 DSC CSRF
 
@@ -99,16 +99,16 @@
 
 ### Access Cookie
 
-| 属性     | 生产                                          | 开发/测试      |
-| -------- | --------------------------------------------- | -------------- |
-| Name     | `__Host-accesstoken`                          | `access_token` |
-| Value    | JWT 原文（复用 `JwtAuthService.sign()` 输出） |
-| HttpOnly | `true`                                        | `true`         |
-| Secure   | `true`                                        | `false`        |
-| SameSite | `Lax`                                         | `Lax`          |
-| Path     | `/`                                           | `/`            |
-| Domain   | 不设置                                        | 不设置         |
-| Max-Age  | `jwtExpiresIn`（与 token exp 一致）           |
+| 属性     | 生产                                                                           | 开发/测试      |
+| -------- | ------------------------------------------------------------------------------ | -------------- |
+| Name     | `__Host-accesstoken`                                                           | `access_token` |
+| Value    | JWT 原文（复用 `JwtAuthService.sign()` 输出）                                  |
+| HttpOnly | `true`                                                                         | `true`         |
+| Secure   | `true`                                                                         | `false`        |
+| SameSite | `Lax`                                                                          | `Lax`          |
+| Path     | `/`                                                                            | `/`            |
+| Domain   | 不设置                                                                         | 不设置         |
+| Max-Age  | 按已签发 JWT 实际 `exp` 计算（解码 token payload），非配置 `jwtExpiresIn` 推算 |
 
 ### CSRF Cookie
 
@@ -174,19 +174,28 @@
 ### Do Not Touch
 
 - 数据库 schema + migration
-- `jwt-auth.service.ts`、`siwe.service.ts`、`nonce.service.ts`、`audit.service.ts`
+- `services/api/src/auth/jwt-auth.service.ts`、`siwe.service.ts`、`nonce.service.ts`
 - `packages/database/src/repositories/*`
 - P1-002 原 15 项测试断言
+
+### Approved Narrow Exemption: AuditService (P1-003)
+
+- 原 "Do Not Touch" 含 `audit.service.ts`。P1-003 Spec 要求 "CSRF 失败 → AUTH_CSRF_FAILURE 审计"，唯一干净实现路径是 AuditService 新增方法。经用户批准的**窄豁免**：
+  - 仅允许**新增** `recordCsrfFailure({requestId, ip, userAgent})` 方法（写 `AUTH_CSRF_FAILURE`，`actor=null`，**显式传 `success: false`**）。
+  - 仅允许**新增** `AuditAction.AUTH_CSRF_FAILURE` + `AuthFailReason.CSRF_TOKEN_INVALID` 枚举值（纯 additive，不改既有枚举成员）。
+  - **禁止**修改 P1-002 既有 Audit 方法、`write()` 默认 `success` 语义、`recordLoginSuccess/Failure/Logout`。
+  - **禁止**修改原 T01-T15 断言（回归 15/15 全 PASS）。
+  - 该豁免仅限 P1-003 CSRF 审计；不延伸至其他阶段或组件。
 
 ## Acceptance Criteria
 
 | AC    | 描述                              | Pass Condition                                                                                                                                           |
 | ----- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AC-1  | verify 成功后投递 HttpOnly Cookie | 响应含 Set-Cookie，属性正确；Max-Age == jwt exp                                                                                                          |
+| AC-1  | verify 成功后投递 HttpOnly Cookie | 响应含 Set-Cookie，属性正确；Max-Age == 已签发 JWT 实际 `exp`（解码 payload，非配置 TTL）                                                                |
 | AC-2  | /csrf-token 端点                  | 返回 {csrfToken} + set csrf cookie（HttpOnly=false, Secure, SameSite=Lax, Path=/）                                                                       |
 | AC-3  | CSRF 强制（cookie 请求）          | POST/PUT/PATCH/DELETE 携带 cookie 时无/不匹配 X-CSRF-TOKEN → 403 + 审计；GET/HEAD/OPTIONS/nonce/verify/csrf-token 豁免；Bearer-only 无 cookie 时正常通过 |
 | AC-4  | 双模式 Guard                      | 仅 Bearer 200；仅 Cookie 200；Bearer+Cookie → Bearer 优先；双无 401                                                                                      |
-| AC-5  | logout 清除 cookie                | access + csrf cookie 均 Max-Age=0；Redis blocklist/session 不变                                                                                          |
+| AC-5  | logout 清除 cookie                | access + csrf cookie 均 Max-Age=0 + Expires=epoch；Redis blocklist/session 不变                                                                          |
 | AC-6  | P1-002 回归                       | 原 15 项 T01-T15 全 PASS，断言不改                                                                                                                       |
 | AC-7  | 数据库零修改                      | 无新 migration；Redis 复用现有 key                                                                                                                       |
 | AC-8  | JwtAuthService 不改               | 内部逻辑零修改，仅复用 sign/verify/revoke                                                                                                                |

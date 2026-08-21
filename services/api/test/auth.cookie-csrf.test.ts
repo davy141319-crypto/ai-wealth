@@ -480,6 +480,18 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
       c.startsWith(`${ACCESS_COOKIE}=`),
     );
     expect(accessLine!.toLowerCase()).not.toContain('secure');
+    // Max-Age MUST equal the SIGNED JWT's real `exp` (decoded from the token
+    // payload), NOT the configured jwtExpiresIn TTL. Allow a few seconds of
+    // slack for test latency between sign and assert.
+    const maxAgeMatch = accessLine!.toLowerCase().match(/max-age=(\d+)/);
+    expect(maxAgeMatch).not.toBeNull();
+    const cookieMaxAgeSec = Number(maxAgeMatch![1]);
+    const jwtPayload = JSON.parse(
+      Buffer.from(accessVal!.split('.')[1], 'base64url').toString('utf8'),
+    ) as { exp: number };
+    const expectedMaxAgeSec = jwtPayload.exp - Math.floor(Date.now() / 1000);
+    expect(cookieMaxAgeSec).toBeGreaterThanOrEqual(expectedMaxAgeSec - 5);
+    expect(cookieMaxAgeSec).toBeLessThanOrEqual(expectedMaxAgeSec + 5);
   });
 
   // ---------------------------- C03 ----------------------------
@@ -532,17 +544,19 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
       .set('X-CSRF-TOKEN', csrfToken);
     expect(lout.status).toBe(200);
     expect(lout.body.data.loggedOut).toBe(true);
-    // Response should clear both access + csrf cookies. Express's
-    // res.clearCookie() sets `Expires` to the epoch (and only emits `Max-Age=0`
-    // when the cookie-serialiser receives a truthy maxAge — `0` is falsy and gets
-    // skipped, so we accept EITHER deletion signal).
+    // Response MUST explicitly clear both access + csrf cookies. Deletion must
+    // carry Max-Age=0 (primary signal) AND Expires=epoch (belt-and-braces) so
+    // the cookie is unambiguously invalidated across browsers.
     const setCookieHeader = (lout.headers['set-cookie'] as string[] | undefined) ?? [];
     const cleared = setCookieHeader.map((c) => c.toLowerCase());
-    const isCleared = (line: string, name: string) =>
-      line.startsWith(`${name}=`) &&
-      (line.includes('max-age=0') || line.includes('expires=thu, 01 jan 1970'));
-    expect(cleared.some((c) => isCleared(c, ACCESS_COOKIE))).toBe(true);
-    expect(cleared.some((c) => isCleared(c, CSRF_COOKIE))).toBe(true);
+    expect(cleared.some((c) => c.startsWith(`${ACCESS_COOKIE}=`) && c.includes('max-age=0'))).toBe(
+      true,
+    );
+    expect(cleared.some((c) => c.startsWith(`${CSRF_COOKIE}=`) && c.includes('max-age=0'))).toBe(
+      true,
+    );
+    // Belt-and-braces: Expires=epoch present on the deletion headers.
+    expect(cleared.some((c) => c.includes('expires=thu, 01 jan 1970'))).toBe(true);
   });
 
   // ---------------------------- C07 ----------------------------
