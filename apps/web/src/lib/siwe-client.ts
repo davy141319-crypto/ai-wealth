@@ -32,15 +32,24 @@
 //     caller can retry once; on 401/403 the session is cleared and the user must
 //     re-authenticate via SIWE.
 //
+// P1-005 修订（session restore）：
+//   - connector（钱包连接器）仅在 login() 签名时需要；me/refresh/logout 不依赖它。
+//   - 因此 connector 改为可选构造参数：应用启动即可 `new SiweWalletClient()`（无 connector）
+//     并调用 me/refresh/logout 恢复会话；登录页在调用 login() 前通过 setConnector() 注入。
+//   - 消除"必须先连钱包才能 restore"的缺陷：restore 在 AuthProvider mount 时立即执行。
+//
 // Usage:
-//   const client = new SiweWalletClient({ api, connector: wagmiConnector() });
+//   const client = new SiweWalletClient(); // 默认 authApi，无 connector，可 me/refresh/logout
+//   client.setConnector(wagmiConnector()); // 登录前注入
 //   const { user } = await client.login();
 //   await client.refresh(); // rotate the refresh cookie before access expiry
 // ============================================================================
 
 import type { Address, Chain as ViemChain, Hash } from 'viem';
 import type { AxiosInstance } from 'axios';
-import { api as defaultApi } from './api';
+// P1-005 强制约束 B：SiweWalletClient 必须仅使用 authApi（无 401 拦截器），
+// 禁止任何路径 fallback 到业务 api.ts（会形成循环依赖）。
+import { authApi as defaultApi } from './authApi';
 
 const CSRF_HEADER = 'X-CSRF-TOKEN';
 /** P1-004 explicit transport declaration. Browser = cookie. */
@@ -153,12 +162,26 @@ export class SiweWalletClient {
   /** Cached CSRF token (Double Submit Cookie). Cleared on logout. */
   private csrfToken: string | undefined;
 
+  /**
+   * 钱包连接器。P1-005 修订：改为可选 + 可后续注入。
+   * me/refresh/logout 不需要 connector；仅 login() 签名时需要。
+   * 应用启动即可无 connector 构造（用于 restore），登录页通过 setConnector 注入。
+   */
+  private connector: LoginConnector | undefined;
+
   constructor(
-    private readonly connector: LoginConnector,
+    connector?: LoginConnector,
     private readonly http: AxiosInstance = defaultApi,
     /** In-memory session store; persists for page lifetime only. */
     private readonly session: { token?: string } = {},
-  ) {}
+  ) {
+    this.connector = connector;
+  }
+
+  /** 登录前注入钱包连接器（仅 login 签名需要）。 */
+  setConnector(connector: LoginConnector): void {
+    this.connector = connector;
+  }
 
   get token(): string | undefined {
     return this.session.token;
@@ -226,6 +249,9 @@ export class SiweWalletClient {
   }
 
   async login(requestId?: string): Promise<{ token?: string; user: VerifyResponseUser }> {
+    if (!this.connector) {
+      throw new Error('LoginConnector not set; call setConnector() before login()');
+    }
     const { address, chainId } = await this.connector.connect();
     const chain = this.connector.resolveChain(chainId) ?? CHAIN_TO_BACKEND[chainId];
     if (!chain) throw new Error(`unsupported chain id: ${chainId}`);
@@ -268,31 +294,18 @@ export class SiweWalletClient {
    * JS. CSRF is enforced (cookie transport). On success the server sets fresh
    * access + refresh cookies.
    *
-   * Error handling:
-   *   - 409 RETRY: the refresh token was just used (network retry). The access
-   *     cookie may still be valid, so the caller can retry once; the refresh
-   *     cookie was cleared by the server, so a second retry will 401 INVALID →
-   *     the caller should re-authenticate via `login()`.
-   *   - 401 INVALID / 403 REUSED / 403 REVOKED: the session is gone — clear and
-   *     re-authenticate via SIWE.
+   * P1-005 v3 修订：禁止 refresh 循环。本方法仅做一次 refresh 请求：
+   *   - 成功 → 返回 { user }
+   *   - 409 RETRY → 抛出带 status=409 的错误（不 clearSession，不重试），
+   *     由 AuthSessionCoordinator 决定是否调 /auth/me 判定会话存活
+   *   - 401 INVALID / 403 REUSED / 403 REVOKED → 抛出带 status 的错误，
+   *     由 Coordinator 决定是否 clearSession + redirect /login
+   *
+   * 这里不再自行重试 refresh，避免循环 refresh 违反 spec v3 AC-5。
    */
   async refresh(): Promise<{ user: VerifyResponseUser }> {
-    try {
-      const resp = await this.post<VerifyResponse>('/auth/refresh', {});
-      return { user: resp.user };
-    } catch (err) {
-      const status = (err as { response?: { status?: number } }).response?.status;
-      if (status === 409) {
-        // Retry once — the rotation race resolved as RETRY; a fresh attempt may
-        // succeed if the client's refresh cookie is still the active one.
-        const resp = await this.post<VerifyResponse>('/auth/refresh', {});
-        return { user: resp.user };
-      }
-      // 401 / 403 — session revoked or invalid. Clear and propagate so the
-      // caller can re-run `login()`.
-      this.clearSession();
-      throw err;
-    }
+    const resp = await this.post<VerifyResponse>('/auth/refresh', {});
+    return { user: resp.user };
   }
 }
 
