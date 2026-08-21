@@ -43,6 +43,24 @@ export interface EnvConfig {
   siweNonceTtlSec: number;
   /** Max allowed issuedAt clock skew in seconds (default 300). */
   siweClockSkewSec: number;
+  /**
+   * Access-token cookie name. Production uses the `__Host-` prefix (requires
+   * HTTPS, Path=/, no Domain) to bind the cookie to the current host; dev/test
+   * use the plain name so it works over localhost HTTP.
+   */
+  cookieName: string;
+  /** CSRF token cookie name (same `__Host-` strategy as access cookie). */
+  csrfCookieName: string;
+  /** Cookie Domain attribute. Empty string means "do not set" (host-only). */
+  cookieDomain: string;
+  /** Cookie Secure flag (true in production over HTTPS, false in dev/test). */
+  cookieSecure: boolean;
+  /** Cookie SameSite attribute ('lax' | 'strict' | 'none'). */
+  cookieSameSite: 'lax' | 'strict' | 'none';
+  /** Cookie Path attribute. `__Host-` cookies must use '/'. */
+  cookiePath: string;
+  /** Header name clients use to submit the CSRF token (Double Submit Cookie). */
+  csrfHeaderName: string;
 }
 
 /** Fatal configuration error — crashes the process at boot by design. */
@@ -80,6 +98,68 @@ function asInt(name: string, fallback: number): number {
     throw new ConfigError(`Environment variable ${name} must be an integer, got: ${raw}`);
   }
   return parsed;
+}
+
+/**
+ * The exact cookie configuration production MUST use. The `__Host-` prefix
+ * (RFC 6265bis) binds a cookie to the exact host: it FORCES Secure, Path=/, and
+ * NO Domain attribute, so the browser only ever sends it over HTTPS to the one
+ * host that set it. Any deviation in production is a security regression
+ * (cookie theft over HTTP, leakage to subdomains, path-scoping bypass) and
+ * MUST crash the process at boot rather than silently downgrading.
+ *
+ * Dev/test retain full freedom to customise these (plain names, Secure=false,
+ * Domain, custom Path) so localhost HTTP works.
+ */
+const PROD_COOKIE_NAME = '__Host-accesstoken';
+const PROD_CSRF_COOKIE_NAME = '__Host-csrf';
+
+interface ProdCookieConfig {
+  cookieName: string;
+  csrfCookieName: string;
+  cookieDomain: string;
+  cookieSecure: boolean;
+  cookieSameSite: 'lax' | 'strict' | 'none';
+  cookiePath: string;
+}
+
+/**
+ * Fail-fast validation of the cookie security configuration when
+ * NODE_ENV=production. Collects ALL violations and throws a single ConfigError
+ * listing them — never silently downgrades, never auto-corrects.
+ */
+function assertProductionCookieConfig(cfg: ProdCookieConfig): void {
+  const violations: string[] = [];
+  if (cfg.cookieName !== PROD_COOKIE_NAME) {
+    violations.push(
+      `COOKIE_NAME must be "${PROD_COOKIE_NAME}" in production, got: "${cfg.cookieName}"`,
+    );
+  }
+  if (cfg.csrfCookieName !== PROD_CSRF_COOKIE_NAME) {
+    violations.push(
+      `CSRF_COOKIE_NAME must be "${PROD_CSRF_COOKIE_NAME}" in production, got: "${cfg.csrfCookieName}"`,
+    );
+  }
+  if (!cfg.cookieSecure) {
+    violations.push('COOKIE_SECURE must be "true" in production (HTTPS is mandatory)');
+  }
+  if (cfg.cookiePath !== '/') {
+    violations.push(`COOKIE_PATH must be "/" in production, got: "${cfg.cookiePath}"`);
+  }
+  if (cfg.cookieDomain !== '') {
+    violations.push(
+      `COOKIE_DOMAIN must be empty in production (__Host- prefix forbids Domain), got: "${cfg.cookieDomain}"`,
+    );
+  }
+  if (cfg.cookieSameSite !== 'lax') {
+    violations.push(`COOKIE_SAMESITE must be "lax" in production, got: "${cfg.cookieSameSite}"`);
+  }
+  if (violations.length > 0) {
+    throw new ConfigError(
+      'Production cookie security configuration is invalid — fail-fast, no silent downgrade:\n  - ' +
+        violations.join('\n  - '),
+    );
+  }
 }
 
 /** Variables each preset strictly requires at boot. */
@@ -127,9 +207,51 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
   const siweUri = optional('SIWE_URI', webAppUrl || 'http://localhost:3000');
   const siweStatement = optional('SIWE_STATEMENT', 'Sign in with Ethereum to AI Wealth DApp.');
 
+  const isProd = nodeEnv === 'production';
+  // Cookie/CSRF config — `__Host-` prefix in production requires HTTPS + Path=/
+  // + no Domain; dev/test fall back to plain names over localhost HTTP.
+  const cookieName = optional('COOKIE_NAME', isProd ? PROD_COOKIE_NAME : 'access_token');
+  const csrfCookieName = optional('CSRF_COOKIE_NAME', isProd ? PROD_CSRF_COOKIE_NAME : 'csrf');
+  // COOKIE_SAMESITE: validate explicitly — NEVER silently downgrade an
+  // unknown value to 'lax'. An invalid value is a configuration error and
+  // must fail fast (otherwise a typo like 'laz' would silently weaken CSRF
+  // protection). In production, only 'lax' is permitted (enforced below).
+  const cookieSameSiteRaw = optional('COOKIE_SAMESITE', 'lax').toLowerCase();
+  if (
+    cookieSameSiteRaw !== 'lax' &&
+    cookieSameSiteRaw !== 'strict' &&
+    cookieSameSiteRaw !== 'none'
+  ) {
+    throw new ConfigError(
+      `COOKIE_SAMESITE must be one of 'lax' | 'strict' | 'none', got: "${cookieSameSiteRaw}"`,
+    );
+  }
+  const cookieSameSite = cookieSameSiteRaw as 'lax' | 'strict' | 'none';
+
+  const cookieDomain = optional('COOKIE_DOMAIN', '');
+  const cookieSecure =
+    optional('COOKIE_SECURE', isProd ? 'true' : 'false').toLowerCase() === 'true';
+  const cookiePath = optional('COOKIE_PATH', '/');
+
+  // Production fail-fast: the cookie security posture is non-negotiable. Any
+  // deviation (non-__Host name, Secure=false, Domain set, Path!=/, SameSite!=lax)
+  // crashes the process at boot rather than silently downgrading. This runs
+  // AFTER defaults are applied, so a correctly-defaulted production env passes
+  // while an explicitly-misconfigured one is rejected.
+  if (isProd) {
+    assertProductionCookieConfig({
+      cookieName,
+      csrfCookieName,
+      cookieDomain,
+      cookieSecure,
+      cookieSameSite,
+      cookiePath,
+    });
+  }
+
   return {
     nodeEnv,
-    isProd: nodeEnv === 'production',
+    isProd,
     // Read every var regardless of preset so callers that do use them get the
     // real value when present (empty string when absent — never throws).
     databaseUrl: optional('DATABASE_URL', ''),
@@ -150,6 +272,13 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
     siweStatement,
     siweNonceTtlSec: asInt('SIWE_NONCE_TTL_SEC', 300),
     siweClockSkewSec: asInt('SIWE_CLOCK_SKEW_SEC', 300),
+    cookieName,
+    csrfCookieName,
+    cookieDomain,
+    cookieSecure,
+    cookieSameSite,
+    cookiePath,
+    csrfHeaderName: optional('CSRF_HEADER_NAME', 'X-CSRF-TOKEN'),
   };
 }
 

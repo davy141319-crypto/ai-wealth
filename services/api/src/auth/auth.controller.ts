@@ -20,12 +20,13 @@ import {
   Ip,
   Post,
   Query,
+  Res,
   UseGuards,
   Headers,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import type { Chain } from '@ai-wealth/database';
 import { ok } from '@ai-wealth/shared';
 import type { ApiSuccessResponse } from '@ai-wealth/shared';
@@ -33,8 +34,11 @@ import { AuthService } from './auth.service';
 import { AuditService } from './audit.service';
 import { JwtAuthService } from './jwt-auth.service';
 import { AuthContext, AuthUser, JwtAuthGuard } from './jwt-auth.guard';
+import { CookieAuthService } from './cookie-auth.service';
+import { CsrfService } from './csrf.service';
 import { NonceQueryDto, NonceResponseDto } from './dto/nonce-query.dto';
 import { MeResponseDto, VerifyRequestDto, VerifyResponseDto } from './dto/verify-request.dto';
+import { CsrfTokenResponseDto } from './dto/csrf-token.dto';
 import { NonceService } from './nonce.service';
 
 const HEADER_REQUEST_ID = 'x-request-id';
@@ -48,7 +52,28 @@ export class AuthController {
     private readonly nonceService: NonceService,
     private readonly jwtAuth: JwtAuthService,
     private readonly audit: AuditService,
+    private readonly cookieAuth: CookieAuthService,
+    private readonly csrf: CsrfService,
   ) {}
+
+  // --------------------------------------------------------------------------
+  // GET /auth/csrf-token — issues a Double Submit Cookie CSRF token.
+  // --------------------------------------------------------------------------
+  @Get('csrf-token')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Issue a CSRF token (Double Submit Cookie) for state-changing requests.',
+  })
+  @ApiResponse({ type: CsrfTokenResponseDto, status: 200 })
+  getCsrfToken(
+    @Res({ passthrough: true }) res: Response,
+  ): ApiSuccessResponse<CsrfTokenResponseDto> {
+    const token = this.csrf.generateToken();
+    // Non-HttpOnly cookie so the browser can read it and echo it back in the
+    // X-CSRF-TOKEN header. Same Secure/SameSite/Path as the access cookie.
+    this.cookieAuth.setCsrfCookie(res, token);
+    return ok({ csrfToken: token });
+  }
 
   // --------------------------------------------------------------------------
   // GET /auth/nonce
@@ -86,6 +111,7 @@ export class AuthController {
   @ApiResponse({ type: VerifyResponseDto, status: 200 })
   async postVerify(
     @Body() body: VerifyRequestDto,
+    @Res({ passthrough: true }) res: Response,
     @Headers(HEADER_REQUEST_ID) requestIdHeader?: string,
     @Headers(HEADER_USER_AGENT) userAgent?: string,
     @Ip() ip?: string,
@@ -103,6 +129,14 @@ export class AuthController {
       network: body.network,
       ...ctx,
     });
+    // P1-003: also deliver the token in an HttpOnly cookie for browser
+    // sessions. The body keeps `accessToken` for Bearer-mode backward
+    // compatibility. CookieAuthService derives Max-Age from the SIGNED JWT's
+    // real `exp` (decoded from the token payload) — NOT from the configured
+    // jwtExpiresIn TTL — so the cookie never outlives the token even when
+    // JwtAuthService clamps exp to a shorter SIWE expirationTime. JwtAuthService
+    // itself is unchanged.
+    this.cookieAuth.setAuthCookie(res, result.token);
     return ok({
       accessToken: result.token,
       user: {
@@ -156,7 +190,8 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Revoke the current JWT session immediately.' })
   async postLogout(
-    @AuthUser() auth?: AuthContext,
+    @Res({ passthrough: true }) res: Response,
+    @AuthUser() auth: AuthContext,
     @Headers(HEADER_REQUEST_ID) requestIdHeader?: string,
     @Headers(HEADER_USER_AGENT) userAgent?: string,
     @Ip() ip?: string,
@@ -169,6 +204,9 @@ export class AuthController {
       ip,
       userAgent,
     });
+    // P1-003: clear the access + CSRF cookies on logout (cookie session mode).
+    // Bearer-only clients have no cookie set, so this is a no-op for them.
+    this.cookieAuth.clearAuthCookies(res);
     return ok({ loggedOut: true });
   }
 }

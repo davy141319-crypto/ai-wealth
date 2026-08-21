@@ -4,6 +4,7 @@ import { NestFactory, Reflector } from '@nestjs/core';
 import { ClassSerializerInterceptor, ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { env, SERVICE_NAMES } from '@ai-wealth/config';
@@ -20,6 +21,8 @@ async function bootstrap(): Promise<void> {
 
   // Security headers (Helmet), strict CORS (no wildcard in any env), rate limiting
   app.use(helmet());
+  // Parse Cookie header so auth/csrf cookies are accessible on req.cookies (P1-003).
+  app.use(cookieParser());
   app.enableCors({
     origin: [cfg.webAppUrl, cfg.adminAppUrl],
     credentials: true,

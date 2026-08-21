@@ -40,6 +40,7 @@ export enum AuthFailReason {
   TOKEN_EXPIRED = 'AUTH_TOKEN_EXPIRED',
   TOKEN_REVOKED = 'AUTH_TOKEN_REVOKED',
   NOT_AUTHENTICATED = 'AUTH_NOT_AUTHENTICATED',
+  CSRF_TOKEN_INVALID = 'AUTH_CSRF_TOKEN_INVALID',
 }
 
 /** AuditLog action names. Stable values; never rename. */
@@ -47,6 +48,7 @@ export enum AuditAction {
   AUTH_LOGIN_SUCCESS = 'AUTH_LOGIN_SUCCESS',
   AUTH_LOGIN_FAILURE = 'AUTH_LOGIN_FAILURE',
   AUTH_LOGOUT = 'AUTH_LOGOUT',
+  AUTH_CSRF_FAILURE = 'AUTH_CSRF_FAILURE',
 }
 
 export class AppError extends Error {
