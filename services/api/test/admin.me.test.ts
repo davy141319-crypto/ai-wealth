@@ -37,6 +37,7 @@ import { AuditAction, AuthzFailReason } from '@ai-wealth/shared';
 import { AppModule } from '../src/app.module';
 import { RedisService } from '../src/common/redis/redis.service';
 import { JwtAuthService } from '../src/auth/jwt-auth.service';
+import { AuditService } from '../src/auth/audit.service';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { FakeRedisService } from './fake-redis.service';
 
@@ -73,6 +74,7 @@ describe('P1-006 GET /api/admin/me', () => {
   let app: INestApplication;
   let http: request.SuperTest<request.Test>;
   let jwtAuth: JwtAuthService;
+  let audit: AuditService;
   let fakeRedis: FakeRedisService;
   let getAuthorizationContextSpy: jest.Mock;
   let auditRows: Array<{
@@ -134,6 +136,7 @@ describe('P1-006 GET /api/admin/me', () => {
     await app.init();
     http = request(app.getHttpServer());
     jwtAuth = app.get(JwtAuthService);
+    audit = app.get(AuditService);
   }, 60_000);
 
   afterAll(async () => {
@@ -315,22 +318,76 @@ describe('P1-006 GET /api/admin/me', () => {
     expect(res2.status).toBe(403);
   });
 
-  // ---------- (13) pre-existing auth audit still uses resource='auth' ----------
-  // The AuditService.write default resource='auth' is asserted indirectly: a
-  // DENIED RBAC row explicitly passes 'admin/me' (proved above), while the
-  // write() default path remains 'auth'. We assert that NO audit row written
-  // during these admin requests carries resource 'auth' (RBAC rows are always
-  // 'admin/me'), confirming the RBAC path never falls through to the default.
-  it('RBAC audit rows never fall through to the default resource=auth', async () => {
-    currentAuthz = { role: 'ADMIN' as UserRole, status: 'ACTIVE' as UserStatus };
-    const token = await mintToken();
-    await http.get('/admin/me').set('Authorization', `Bearer ${token}`);
-    const rbacActions = auditRows.filter((r) =>
-      [AuditAction.AUTHZ_DECISION_ALLOWED, AuditAction.AUTHZ_DECISION_DENIED].includes(
-        r.action as AuditAction,
-      ),
-    );
-    expect(rbacActions.length).toBeGreaterThan(0);
-    expect(rbacActions.every((r) => r.resource === 'admin/me')).toBe(true);
+  // ---------- (13) REAL AuditService old-path calls keep resource='auth' ----------
+  // These exercise the PRODUCTION AuditService instance obtained from the Nest
+  // app (app.get(AuditService)) — i.e. the real write() method and its
+  // `resource ?? 'auth'` default — NOT source grep or indirect inference.
+  // The only mock is the auditLog.create persistence boundary (which records
+  // to auditRows). This proves P1-006 did not change the pre-existing default
+  // semantics: login success/failure, logout, and refresh success/failure
+  // audit rows all keep resource='auth'.
+  describe('AuditService old-path calls keep resource=auth (real AuditService instance)', () => {
+    beforeEach(() => {
+      auditRows = [];
+    });
+
+    it('recordLoginSuccess writes resource=auth', async () => {
+      await audit.recordLoginSuccess({
+        userId: ADMIN_ID,
+        walletId: WALLET_ID,
+        chain: 'ETH',
+        address: '0x' + '1'.repeat(40),
+      });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].action).toBe(AuditAction.AUTH_LOGIN_SUCCESS);
+      expect(auditRows[0].resource).toBe('auth');
+    });
+
+    it('recordLoginFailure writes resource=auth', async () => {
+      await audit.recordLoginFailure({ reason: 'BAD_SIGNATURE' });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].action).toBe(AuditAction.AUTH_LOGIN_FAILURE);
+      expect(auditRows[0].resource).toBe('auth');
+    });
+
+    it('recordLogout writes resource=auth', async () => {
+      await audit.recordLogout({ userId: ADMIN_ID });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].action).toBe(AuditAction.AUTH_LOGOUT);
+      expect(auditRows[0].resource).toBe('auth');
+    });
+
+    it('recordRefreshSuccess writes resource=auth', async () => {
+      await audit.recordRefreshSuccess({
+        userId: ADMIN_ID,
+        familyId: 'family-1',
+      });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].action).toBe(AuditAction.AUTH_REFRESH_SUCCESS);
+      expect(auditRows[0].resource).toBe('auth');
+    });
+
+    it('recordRefreshFailure writes resource=auth', async () => {
+      await audit.recordRefreshFailure({ reason: 'REFRESH_TOKEN_INVALID' });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].action).toBe(AuditAction.AUTH_REFRESH_FAILURE);
+      expect(auditRows[0].resource).toBe('auth');
+    });
+
+    // Complementary RBAC-side check: RBAC rows are always 'admin/me' and never
+    // fall through to the default 'auth'. (This is the RBAC isolation guard,
+    // not the evidence for the old-path default — the tests above prove that.)
+    it('RBAC audit rows never fall through to the default resource=auth', async () => {
+      currentAuthz = { role: 'ADMIN' as UserRole, status: 'ACTIVE' as UserStatus };
+      const token = await mintToken();
+      await http.get('/admin/me').set('Authorization', `Bearer ${token}`);
+      const rbacActions = auditRows.filter((r) =>
+        [AuditAction.AUTHZ_DECISION_ALLOWED, AuditAction.AUTHZ_DECISION_DENIED].includes(
+          r.action as AuditAction,
+        ),
+      );
+      expect(rbacActions.length).toBeGreaterThan(0);
+      expect(rbacActions.every((r) => r.resource === 'admin/me')).toBe(true);
+    });
   });
 });
