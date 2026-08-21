@@ -16,12 +16,11 @@
 // service while still guarding the default whenever a developer runs the suite
 // against a local DB.
 //
-// NOTE on the unrelated pre-existing FK cascade test: repositories.integration
-// .test.ts:378 ('a user with a wallet cannot be deleted (RESTRICT)') expects
-// RESTRICT but the wallets.user_id FK is ON DELETE SET NULL by design since
-// P1-002 (unbound wallets for nonce issuance). That test is a pre-existing
-// latent develop bug (exposed only when integration tests run against a real
-// DB; skipped in CI) and is OUT OF SCOPE for this wallets.status hotfix.
+// NOTE on the FK cascade test: repositories.integration.test.ts previously
+// asserted RESTRICT on user delete, but wallets.user_id is ON DELETE SET NULL
+// by design since P1-002 (unbound wallets for nonce issuance). PR#7 corrected
+// that test to assert the real SET NULL contract, so the integration suite now
+// passes against a real DB instead of relying on the CI skip.
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';

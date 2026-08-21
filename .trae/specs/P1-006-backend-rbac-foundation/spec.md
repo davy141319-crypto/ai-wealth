@@ -1,10 +1,19 @@
 # P1-006 — Backend RBAC Foundation
 
 > **Status: SPEC LOCKED / READY FOR IMPLEMENTATION.**
-> Baseline: `origin/develop@8343b3ad473e11396f1a1f57f4418718ca459cea`
+> Baseline: `origin/develop@8343b3ad473e11396f1a1f57f4418718ca459cea` (initial)
+> Updated baseline: `origin/develop@5ccf94ab0ad64240fa7da02926ff0e4cecafdad9`
+> (after PR #8 — P1-002 wallets.status drift hotfix — squash-merged).
 > This document is the **single implementation contract** (v2.1 full text +
 > v2.2 final patches + implementation-time hardening A/B). No other source of
 > truth supersedes it.
+>
+> **Migration rename note (PR#7 update):** the P1-006 migration was renamed
+> `20260821131246_p1_006_user_role` → `20260821150000_p1_006_user_role` so it
+> sorts strictly AFTER the now-merged P1-002 hotfix
+> `20260821141034_p1_002_wallet_status_default`. SQL body unchanged. This
+> migration MUST NOT duplicate the wallets.status ALTER (owned by the P1-002
+> hotfix).
 
 ## Goal
 
@@ -89,6 +98,9 @@ JWT 继续只负责 Authentication；Authorization 实时读 DB 当前 role+stat
   预期新 enum 使用 `UserRole`（无 `@@map`）。
 - 必须检查 `prisma migrate diff`/drift；禁止 schema 与 migration 物理类型名不一致。
 - migration SQL 实际生成结果以 `prisma migrate dev` 为准，不得手工篡改类型名。
+- P1-006 migration `20260821150000_p1_006_user_role` 排序严格晚于 develop 已合入的
+  P1-002 hotfix `20260821141034_p1_002_wallet_status_default`。本 migration 只含
+  `UserRole` enum + `users.role` 列；**禁止重复** `wallets.status` ALTER（由 P1-002 hotfix 负责）。
 
 ### B. Provisioning 权威审计原子性
 

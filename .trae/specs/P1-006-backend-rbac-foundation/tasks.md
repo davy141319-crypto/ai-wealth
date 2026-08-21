@@ -1,7 +1,11 @@
 # P1-006 — Backend RBAC Foundation Tasks
 
 > Spec contract: see `spec.md` (v2.1 + v2.2 + implementation hardening A/B).
-> Baseline: `origin/develop@8343b3ad473e11396f1a1f57f4418718ca459cea`
+> Baseline: `origin/develop@8343b3ad473e11396f1a1f57f4418718ca459cea` (initial)
+> Updated baseline: `origin/develop@5ccf94ab0ad64240fa7da02926ff0e4cecafdad9`
+> (after PR #8 P1-002 wallets.status hotfix squash-merged).
+> Migration: `20260821150000_p1_006_user_role` (renamed from `20260821131246_`
+> to sort strictly after the merged `20260821141034_p1_002_wallet_status_default`).
 
 ## T01 — Prisma schema：UserRole enum + User.role
 
@@ -12,7 +16,9 @@
 
 ## T02 — Prisma migration（additive, drift-free；hardening A）
 
-- `pnpm --filter @ai-wealth/database exec prisma migrate dev --name p1_006_user_role`
+- 产物 migration 目录：`20260821150000_p1_006_user_role`（排序严格晚于 develop 已合入的
+  `20260821141034_p1_002_wallet_status_default`；SQL 仅含 UserRole + users.role，**禁止重复
+  wallets.status ALTER**）
 - 产物以 `prisma migrate dev` 实际生成为准；**禁止手工篡改 enum 物理类型名**（不得强制 snake_case `user_role`）
 - 校验 `prisma migrate diff` 无 schema/migration drift
 - 存量行全部 USER（NOT NULL DEFAULT 'USER' 已保证；显式 UPDATE 兜底）
