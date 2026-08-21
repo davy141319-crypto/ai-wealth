@@ -196,6 +196,8 @@ services:
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.admin
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
     container_name: aiwealth-admin
     restart: unless-stopped
     depends_on:
