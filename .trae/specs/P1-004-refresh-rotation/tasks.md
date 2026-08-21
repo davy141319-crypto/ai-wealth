@@ -58,5 +58,5 @@ Audit 窄豁免（沿用 P1-003）：仅 additive 新增 refresh 审计方法。
   - 新增 R30 测试：验证 409 后 access cookie 未清 + access JWT 仍可认证 /me
 - **修复 3**（Lua 脚本 dist 验证）:
   - `nest-cli.json`: 配置 `compilerOptions.assets` 将 `**/*.lua` 复制到 dist
-  - 新增 R31 测试：验证 `dist/auth/refresh-rotation.lua` 存在 + 内容非空
+  - 新增 R31 测试：测试内自执行 `pnpm run build`（真实 `nest build`），再断言 `dist/auth/refresh-rotation.lua` 存在 + 内容非空 + nest-cli.json 含 lua assets glob（不依赖 CI build 作业先行，test 作业在 build 之前也能通过）
   - Dockerfile.api 不需改动（COPY services/api 整体覆盖 dist）
