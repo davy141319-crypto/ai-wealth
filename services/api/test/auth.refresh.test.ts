@@ -1035,29 +1035,46 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // R31 — refresh-rotation.lua must be present in the compiled dist/ output
-  // (services/api/dist/auth/refresh-rotation.lua) so the API Docker image can
-  // load it at runtime via `readFile(join(__dirname, 'refresh-rotation.lua'))`.
-  // This is a SELF-CONTAINED build-artifact check: it runs a REAL `nest build`
-  // inside the test body (not relying on a pre-existing dist/), so it passes
-  // regardless of CI job ordering — the `test` job runs BEFORE the `build` job,
-  // so dist/ does not exist when jest starts. Verifies v5+ FINAL fix-3:
-  // nest-cli.json `assets` copies **/*.lua into dist during `nest build`; if the
-  // glob is removed, the build still succeeds but dist lacks the lua and
-  // RefreshTokenService throws LUA_SCRIPT_MISSING at runtime in the container.
+  // R31 — refresh-rotation.lua asset-copy CONTRACT check (static, no build).
+  //
+  // RefreshTokenService loads the rotation script at runtime via
+  //   readFile(join(__dirname, 'refresh-rotation.lua'))
+  // (services/api/src/auth/refresh-token.service.ts). When compiled, the service
+  // lives at dist/auth/refresh-token.service.js, so __dirname resolves to
+  // dist/auth/ and the runtime path is dist/auth/refresh-rotation.lua. If that
+  // file is absent, the service throws LUA_SCRIPT_MISSING on the first refresh
+  // (a 500 inside the API Docker container).
+  //
+  // This test is a STATIC contract check — fast, no build, runs in the CI `test`
+  // job (which runs BEFORE the `build` job, so dist/ does not exist yet). It
+  // verifies the three preconditions that MUST hold for `nest build` to place
+  // the lua into dist:
+  //   (a) the lua source is committed with the rotation body,
+  //   (b) nest-cli.json declares a `*.lua` asset glob that matches the source
+  //       file (so `nest build` copies it),
+  //   (c) RefreshTokenService reads the SAME basename as the committed file
+  //       (rename-mismatch guard).
+  //
+  // The DYNAMIC verification — that the lua is actually present in dist/ after a
+  // REAL build and at the Docker container runtime path — is enforced by two
+  // fail-fast CI gates that run WHERE the build happens (so they have dist/):
+  //   • .github/workflows/ci.yml `build` job, after `pnpm run build`:
+  //       test -f services/api/dist/auth/refresh-rotation.lua
+  //   • infrastructure/docker/Dockerfile.api, after the api `nest build`:
+  //       RUN test -f services/api/dist/auth/refresh-rotation.lua
+  // Both fail the build / image if the asset copy is broken.
   // -------------------------------------------------------------------------
-  it('R31 refresh-rotation.lua is present in dist after a real nest build', async () => {
+  it('R31 refresh-rotation.lua asset-copy contract (source + nest-cli assets glob + service read path)', async () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const path = require('node:path') as typeof import('node:path');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require('node:fs') as typeof import('node:fs');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { execSync } = require('node:child_process') as typeof import('node:child_process');
 
     const apiRoot = path.resolve(__dirname, '..');
     const srcLua = path.join(apiRoot, 'src', 'auth', 'refresh-rotation.lua');
-    const distLua = path.join(apiRoot, 'dist', 'auth', 'refresh-rotation.lua');
+    const serviceSrc = path.join(apiRoot, 'src', 'auth', 'refresh-token.service.ts');
     const nestCliPath = path.join(apiRoot, 'nest-cli.json');
+    const luaBasename = 'refresh-rotation.lua';
 
     // (a) Source lua is committed and contains the rotation script body.
     expect(fs.existsSync(srcLua)).toBe(true);
@@ -1065,39 +1082,25 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
     expect(srcContent).toContain('P1-004 Refresh Token Rotation');
     expect(srcContent.length).toBeGreaterThan(500);
 
-    // (b) nest-cli.json must declare the **/*.lua asset glob so `nest build`
-    //     copies it into dist. A regression that drops this glob is caught here
-    //     even before running the build.
+    // (b) nest-cli.json must declare a `*.lua` asset glob that matches the
+    //     source file, so `nest build` copies it into dist/auth/. A regression
+    //     that drops the glob (or scopes it away from .lua) is caught here
+    //     before the build job runs.
     const nestCli = JSON.parse(fs.readFileSync(nestCliPath, 'utf8')) as {
       compilerOptions?: { assets?: Array<{ include: string }> };
     };
     const assetGlobs = (nestCli.compilerOptions?.assets ?? []).map((a) => a.include);
-    expect(assetGlobs.some((g) => g.includes('lua'))).toBe(true);
+    expect(assetGlobs.length).toBeGreaterThan(0);
+    expect(assetGlobs.some((g) => g.endsWith('*.lua'))).toBe(true);
+    expect(srcLua.endsWith('.lua')).toBe(true);
 
-    // (c) Run a REAL `nest build` (the api build script) right here so the test
-    //     does not depend on dist/ having been built by a prior CI step. This
-    //     mirrors what the Docker image build does and verifies the lua lands in
-    //     dist/auth/refresh-rotation.lua. deleteOutDir:true wipes dist first, so
-    //     a stale lua from a previous build can never produce a false pass.
-    try {
-      execSync('pnpm run build', {
-        cwd: apiRoot,
-        stdio: 'pipe',
-        timeout: 180000,
-        env: process.env,
-      });
-    } catch (err) {
-      const e = err as { stdout?: Buffer; stderr?: Buffer };
-      const detail = [e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join('\n');
-      throw new Error(
-        `R31: \`nest build\` failed; lua asset copy could not be verified.\n${detail}`,
-      );
-    }
-
-    // (d) After the real build, the lua MUST exist in dist and contain the body.
-    expect(fs.existsSync(distLua)).toBe(true);
-    const distContent = fs.readFileSync(distLua, 'utf8');
-    expect(distContent).toContain('P1-004 Refresh Token Rotation');
-    expect(distContent.length).toBeGreaterThan(500);
+    // (c) RefreshTokenService must read the SAME basename as the committed file
+    //     via `readFile(join(__dirname, 'refresh-rotation.lua'))`, so the
+    //     compiled service resolves to dist/auth/refresh-rotation.lua. A rename
+    //     of the file without updating the service (or vice versa) is caught.
+    expect(fs.existsSync(serviceSrc)).toBe(true);
+    const serviceContent = fs.readFileSync(serviceSrc, 'utf8');
+    expect(serviceContent).toContain(`'${luaBasename}'`);
+    expect(serviceContent).toContain('readFile(join(__dirname,');
   });
 });
