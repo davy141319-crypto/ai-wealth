@@ -58,5 +58,25 @@ Audit 窄豁免（沿用 P1-003）：仅 additive 新增 refresh 审计方法。
   - 新增 R30 测试：验证 409 后 access cookie 未清 + access JWT 仍可认证 /me
 - **修复 3**（Lua 脚本 dist 验证）:
   - `nest-cli.json`: 配置 `compilerOptions.assets` 将 `**/*.lua` 复制到 dist
-  - 新增 R31 测试：测试内自执行 `pnpm run build`（真实 `nest build`），再断言 `dist/auth/refresh-rotation.lua` 存在 + 内容非空 + nest-cli.json 含 lua assets glob（不依赖 CI build 作业先行，test 作业在 build 之前也能通过）
-  - Dockerfile.api 不需改动（COPY services/api 整体覆盖 dist）
+  - 新增 R31 测试：静态契约检查（源文件 + nest-cli.json assets glob + 服务读取 basename 一致），不依赖 CI build 作业先行
+  - CI ci.yml build job: 新增 `test -f services/api/dist/auth/refresh-rotation.lua` 动态验证
+  - Dockerfile.api: 新增 `RUN test -f services/api/dist/auth/refresh-rotation.lua` 动态验证
+
+## v6（2 项 P0 修复）
+
+- **P0-1**（禁止 wallets[0] 创建 family）:
+  - `auth.service.ts`: `VerifySuccess` 接口 additive 新增 `verifiedWalletId: string`（本次 SIWE 已验证的 walletId）；`verify()` 返回 `verifiedWalletId: wallet.id`
+  - `auth.controller.ts`: /verify 改用 `result.verifiedWalletId` 替代 `result.user.wallets[0]?.id ?? ''`
+  - `refresh-token.service.ts`: `issueFamily` 新增空 walletId 校验（空值抛 `WALLET_ID_REQUIRED`）
+  - 不得改 JwtAuthService/SIWE/Nonce/Repository
+- **P0-2**（保持 SIWE 绝对过期边界）:
+  - `auth.service.ts`: `VerifySuccess` 接口 additive 新增 `authorizationExpiresAt: string | null`（`parsed.expirationTime`）
+  - `refresh-token.service.ts`: `FamilyMeta` 新增 `authorizationExpiresAt: number | null`；`issueFamily` 接受 `authorizationExpiresAt?` 参数；`familyExpiresAt = min(now + familyMaxLifetimeSec, authorizationExpiresAt)`
+  - `auth.controller.ts`: /refresh 中 `jwtAuth.sign` 传入 `absoluteExpiresAtIso`（从 family.authorizationExpiresAt 转换），确保 access JWT 不越过原 SIWE 授权期限
+  - `fake-redis.service.ts`: runScript 解析 fam 时保留 `authorizationExpiresAt` 字段（revoke 分支重新序列化不丢失）
+- **新增测试**:
+  - R32: 多钱包登录 → family walletId = B（不是 wallets[0]）；refresh 后 access JWT walletId = B
+  - R33: SIWE exp < 30d → familyExpiresAt ≤ SIWE exp；refresh 后 access exp ≤ SIWE exp
+  - R34: 无 SIWE exp → family 仍最大 30d（authorizationExpiresAt=null）
+  - R10/R26: 调整 SIWE exp 使其长于 fast-forward 时间（适应 v6 familyExpiresAt 受 SIWE exp 约束的新行为）；断言不改
+- **同步 spec/PR body**: 删除 legacy 描述；更新测试数量（59→64）；更新 AC-34/35/36

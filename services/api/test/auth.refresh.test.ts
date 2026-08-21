@@ -42,6 +42,12 @@
 //        and the existing access JWT still authenticates /auth/me (v5+ FINAL fix-2)
 //   R31  refresh-rotation.lua is present in the compiled dist/ output so the API
 //        Docker image can load it at runtime (v5+ FINAL fix-3)
+//   R32  (v6 P0-1) multi-wallet login: family walletId = the verified wallet (B),
+//        NOT wallets[0]; after refresh the new access JWT walletId is also B.
+//   R33  (v6 P0-2) SIWE expirationTime < 30d: familyExpiresAt clamped to SIWE exp;
+//        after refresh the new access JWT exp does NOT exceed the SIWE boundary.
+//   R34  (v6 P0-2) no SIWE expirationTime: family still lives the full 30d and the
+//        access JWT uses its configured TTL (no SIWE clamp).
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -68,6 +74,7 @@ import { AppError, AuthFailReason } from '@ai-wealth/shared';
 import { env } from '@ai-wealth/config';
 import { AppModule } from '../src/app.module';
 import { RedisService } from '../src/common/redis/redis.service';
+import { RefreshTokenService } from '../src/auth/refresh-token.service';
 import { SiweService } from '../src/auth/siwe.service';
 import type { SiweMessage } from '../src/auth/siwe.message';
 import { FakeRedisService } from './fake-redis.service';
@@ -467,14 +474,21 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
     return req;
   }
 
-  /** Cookie-mode login: sets access+refresh cookies, body only {user}. */
-  async function loginCookie(): Promise<{
+  /** Cookie-mode login: sets access+refresh cookies, body only {user}.
+   *  v6: `siweExpiresAt` lets the caller extend the SIWE authorization boundary
+   *  past the default 10min so tests that fast-forward (R10/R26) keep the
+   *  family alive under the new SIWE-clamped familyExpiresAt. */
+  async function loginCookie(siweExpiresAt?: Date): Promise<{
     accessVal: string;
     refreshVal: string;
     userId: string;
   }> {
     const n = await getNonce(alice);
-    const message = buildSiweMessage({ ...n, address: alice.address });
+    const message = buildSiweMessage({
+      ...n,
+      address: alice.address,
+      expiresAt: siweExpiresAt,
+    });
     const signature = await signMessage(alice, message);
     const r = await verifyRaw({
       message,
@@ -492,13 +506,17 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
   }
 
   /** API-mode login: body has tokens, no Set-Cookie. */
-  async function loginApi(): Promise<{
+  async function loginApi(siweExpiresAt?: Date): Promise<{
     accessToken: string;
     refreshToken: string;
     userId: string;
   }> {
     const n = await getNonce(alice);
-    const message = buildSiweMessage({ ...n, address: alice.address });
+    const message = buildSiweMessage({
+      ...n,
+      address: alice.address,
+      expiresAt: siweExpiresAt,
+    });
     const signature = await signMessage(alice, message);
     const r = await verifyRaw({ message, signature, address: alice.address, transport: 'api' });
     expect(r.status).toBe(200);
@@ -707,7 +725,9 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
 
   // R10 — logout cookie + access expired + valid refresh → 200.
   it('R10 logout cookie + access expired + valid refresh → 200 + revoke family', async () => {
-    const { accessVal, refreshVal } = await loginCookie();
+    // v6: SIWE exp must exceed the fast-forward (15min+60s) so the family is
+    // still alive after the access JWT expires.
+    const { accessVal, refreshVal } = await loginCookie(new Date(Date.now() + 60 * 60 * 1000));
     // Fast-forward past the access JWT lifetime (15min) so access is expired.
     fakeRedis.__fastForwardAll(TEST_JWT_TTL_SEC + 60);
     const csrf = await getCsrf();
@@ -933,7 +953,8 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
 
   // R26 — family near 30d → new key TTL = familyExpiresAt-now (short).
   it('R26 family near 30d → new key TTL = familyExpiresAt-now (short)', async () => {
-    const { refreshVal } = await loginCookie();
+    // v6: SIWE exp must exceed 30d so the family lives the full 30d (not clamped).
+    const { refreshVal } = await loginCookie(new Date(Date.now() + 31 * 24 * 60 * 60 * 1000));
     // Age the family by 29 days (of the 30-day max lifetime).
     const twentyNineDays = 29 * 24 * 60 * 60;
     fakeRedis.__fastForwardAll(twentyNineDays);
@@ -1102,5 +1123,188 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
     const serviceContent = fs.readFileSync(serviceSrc, 'utf8');
     expect(serviceContent).toContain(`'${luaBasename}'`);
     expect(serviceContent).toContain('readFile(join(__dirname,');
+  });
+
+  // =========================================================================
+  // R32 (v6 P0-1) — multi-wallet login: family walletId = the verified wallet
+  // (B), NOT wallets[0]; after refresh the new access JWT walletId is also B.
+  //
+  // Regression guard: before v6, AuthController used `result.user.wallets[0]?.id`
+  // which is order-dependent. When a user owns wallets [A, B] and logs in with
+  // wallet B, wallets[0] is A — the refresh family would be bound to the WRONG
+  // wallet. v6 fixes this by having AuthService.verify return the verified
+  // walletId additively, and issueFamily rejects empty walletId.
+  // -------------------------------------------------------------------------
+  it('R32 (v6 P0-1) multi-wallet login → family walletId = verified wallet B, not wallets[0]', async () => {
+    const bob = privateKeyToAccount(generatePrivateKey());
+
+    // Seed the fake DB with a user owning TWO wallets: A (alice) + B (bob).
+    // Alice's wallet is created FIRST so it sits at index 0 in listByUser.
+    const userRow: User = {
+      id: randomUUID(),
+      status: 'ACTIVE' as UserStatus,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastLoginAt: null,
+      locale: 'en',
+      timezone: 'UTC',
+    };
+    currentDB.users[userRow.id] = userRow;
+    const walletA: Wallet = {
+      id: randomUUID(),
+      userId: userRow.id,
+      address: alice.address,
+      chain: 'ETH' as Chain,
+      network: 'mainnet',
+      status: 'CONNECTED' as WalletStatus,
+      isPrimary: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const walletB: Wallet = {
+      id: randomUUID(),
+      userId: userRow.id,
+      address: bob.address,
+      chain: 'ETH' as Chain,
+      network: 'mainnet',
+      status: 'CONNECTED' as WalletStatus,
+      isPrimary: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    currentDB.wallets[walletA.id] = walletA;
+    currentDB.wallets[walletB.id] = walletB;
+
+    // Login with wallet B (bob). The nonceService will find wallet B (by
+    // address+chain+network) and the verify flow must bind the family to B.
+    const n = await getNonce(bob);
+    const message = buildSiweMessage({ ...n, address: bob.address });
+    const signature = await signMessage(bob, message);
+    const r = await verifyRaw({
+      message,
+      signature,
+      address: bob.address,
+      transport: 'api',
+    });
+    expect(r.status).toBe(200);
+    const refreshToken = r.body.data.refreshToken;
+
+    // The refresh family MUST be bound to wallet B (the verified wallet),
+    // NOT wallet A (wallets[0]). This is the P0-1 fix.
+    const refreshTokens = app.get(RefreshTokenService);
+    const familyId = await refreshTokens.verifyRefreshToken(refreshToken);
+    expect(familyId).toBeTruthy();
+    const fam = await refreshTokens.getFamilyMeta(familyId!);
+    expect(fam).toBeTruthy();
+    expect(fam!.walletId).toBe(walletB.id);
+    expect(fam!.walletId).not.toBe(walletA.id);
+
+    // After refresh, the new access JWT MUST carry walletId = B.
+    const rr = await refreshApi(refreshToken);
+    expect(rr.status).toBe(200);
+    const newAccessToken = rr.body.data.accessToken;
+    expect(newAccessToken).toBeTruthy();
+    // Decode the JWT payload (no verify — we just inspect the walletId claim).
+    const payloadB64 = newAccessToken.split('.')[1];
+    const payloadJson = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      sub: string;
+      walletId?: string;
+    };
+    expect(payloadJson.walletId).toBe(walletB.id);
+    expect(payloadJson.walletId).not.toBe(walletA.id);
+  });
+
+  // =========================================================================
+  // R33 (v6 P0-2) — SIWE expirationTime < 30d: familyExpiresAt clamped to
+  // SIWE exp; after refresh the new access JWT exp does NOT exceed the SIWE
+  // boundary. This preserves the P1-002 SIWE absolute expiry across rotation.
+  // -------------------------------------------------------------------------
+  it('R33 (v6 P0-2) SIWE exp < 30d → familyExpiresAt clamped + refresh access exp ≤ SIWE exp', async () => {
+    // Build a SIWE message with a SHORT expirationTime (1 hour from now).
+    // The default family lifetime is 30d; 1h < 30d so the family MUST be
+    // clamped to 1h. The access JWT TTL is 15min, so the first access JWT is
+    // already under 1h — but after refresh the new access JWT must ALSO stay
+    // under the 1h SIWE boundary (not the 15min TTL).
+    const siweExpMs = Date.now() + 60 * 60 * 1000; // 1 hour
+    const n = await getNonce(alice);
+    const message = buildSiweMessage({
+      ...n,
+      address: alice.address,
+      expiresAt: new Date(siweExpMs),
+    });
+    const signature = await signMessage(alice, message);
+    const r = await verifyRaw({
+      message,
+      signature,
+      address: alice.address,
+      transport: 'api',
+    });
+    expect(r.status).toBe(200);
+    const refreshToken = r.body.data.refreshToken;
+
+    // The family MUST be clamped to the SIWE expirationTime.
+    const refreshTokens = app.get(RefreshTokenService);
+    const familyId = await refreshTokens.verifyRefreshToken(refreshToken);
+    expect(familyId).toBeTruthy();
+    const fam = await refreshTokens.getFamilyMeta(familyId!);
+    expect(fam).toBeTruthy();
+    const siweExpSec = Math.floor(siweExpMs / 1000);
+    // familyExpiresAt must equal (or be very close to) the SIWE exp, and MUST
+    // be strictly less than now + 30d.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const maxFamilySec = nowSec + env().familyMaxLifetimeSec;
+    expect(fam!.familyExpiresAt).toBeLessThanOrEqual(siweExpSec);
+    expect(fam!.familyExpiresAt).toBeLessThan(maxFamilySec);
+    // authorizationExpiresAt must be stored (epoch seconds).
+    expect(fam!.authorizationExpiresAt).toBe(siweExpSec);
+
+    // Refresh → the new access JWT exp MUST NOT exceed the SIWE boundary.
+    const rr = await refreshApi(refreshToken);
+    expect(rr.status).toBe(200);
+    const newAccessToken = rr.body.data.accessToken;
+    const payloadB64 = newAccessToken.split('.')[1];
+    const payloadJson = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      exp: number;
+    };
+    expect(payloadJson.exp).toBeLessThanOrEqual(siweExpSec);
+  });
+
+  // =========================================================================
+  // R34 (v6 P0-2) — no SIWE expirationTime: family still lives the full 30d
+  // and the access JWT uses its configured TTL (no SIWE clamp).
+  //
+  // The SIWE parser currently requires expirationTime (EIP-4361 allows it to be
+  // optional, but P1-002 made it mandatory for stricter replay protection).
+  // This test exercises the issueFamily code path directly with a null
+  // authorizationExpiresAt to prove the family lives the full 30d when no SIWE
+  // boundary is present (defensive: future SIWE relaxation would still be safe).
+  // -------------------------------------------------------------------------
+  it('R34 (v6 P0-2) no SIWE expirationTime → family lives full 30d (no clamp)', async () => {
+    const refreshTokens = app.get(RefreshTokenService);
+    const userId = randomUUID();
+    const walletId = randomUUID();
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const maxFamilySec = nowSec + env().familyMaxLifetimeSec;
+
+    // issueFamily with NO authorizationExpiresAt — the family MUST live the
+    // full familyMaxLifetimeSec (30d default).
+    const { refreshToken, familyId, familyExpiresAt } = await refreshTokens.issueFamily({
+      userId,
+      walletId,
+      authorizationExpiresAt: null,
+    });
+    expect(refreshToken).toBeTruthy();
+    expect(familyId).toBeTruthy();
+    // familyExpiresAt should equal now + familyMaxLifetimeSec (within a small
+    // tolerance for test execution time).
+    expect(familyExpiresAt).toBeGreaterThanOrEqual(maxFamilySec - 5);
+    expect(familyExpiresAt).toBeLessThanOrEqual(maxFamilySec + 5);
+
+    // Family meta: authorizationExpiresAt must be null.
+    const fam = await refreshTokens.getFamilyMeta(familyId);
+    expect(fam).toBeTruthy();
+    expect(fam!.authorizationExpiresAt).toBeNull();
+    expect(fam!.familyExpiresAt).toBeGreaterThanOrEqual(maxFamilySec - 5);
   });
 });

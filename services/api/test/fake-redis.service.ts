@@ -328,12 +328,16 @@ export class FakeRedisService implements OnModuleDestroy {
     if (this._exists(kRevoked) > 0) return [3, ''];
     const famRaw = this._get(kFamily);
     if (!famRaw) return [4, '']; // family TTL elapsed
+    // P1-004 v6: preserve ALL FamilyMeta fields (including authorizationExpiresAt)
+    // so re-serialisation in the revoke branches does not drop the SIWE boundary.
     const fam = JSON.parse(famRaw) as {
       userId: string;
       walletId: string;
       status: 'ACTIVE' | 'REVOKED';
       createdAt: number;
       familyExpiresAt: number;
+      authorizationExpiresAt?: number | null;
+      [key: string]: unknown;
     };
     if (fam.status === 'REVOKED') return [3, ''];
 

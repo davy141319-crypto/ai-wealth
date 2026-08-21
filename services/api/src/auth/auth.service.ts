@@ -38,6 +38,19 @@ export interface VerifyRequestInput {
 export interface VerifySuccess {
   token: string;
   user: User & { wallets: Wallet[] };
+  /**
+   * P1-004 (additive): the walletId that was actually verified by THIS SIWE
+   * login. Family issuance MUST use this value (never `user.wallets[0]` which
+   * is order-dependent and could bind a refresh family to the wrong wallet
+   * when the user owns multiple wallets).
+   */
+  verifiedWalletId: string;
+  /**
+   * P1-004 (additive): the SIWE authorization expiry (parsed.expirationTime).
+   * The refresh-token family MUST NOT outlive this boundary; every access JWT
+   * minted during refresh MUST be clamped to it as well.
+   */
+  authorizationExpiresAt: string | null;
 }
 
 @Injectable()
@@ -202,6 +215,15 @@ export class AuthService {
         return {
           token,
           user: { ...updatedUser, wallets },
+          // P1-004 (additive): the walletId that was actually verified by this
+          // SIWE login — used by issueFamily to bind the refresh family to the
+          // correct wallet when the user owns multiple wallets.
+          verifiedWalletId: wallet.id,
+          // P1-004 (additive): the SIWE authorization expiry. The refresh-token
+          // family MUST NOT outlive this boundary (familyExpiresAt =
+          // min(now + 30d, authorizationExpiresAt)); every access JWT minted
+          // during refresh MUST be clamped to it as well.
+          authorizationExpiresAt: parsed.expirationTime ?? null,
         };
       });
     } catch (err) {

@@ -40,6 +40,13 @@ interface FamilyMeta {
   status: 'ACTIVE' | 'REVOKED';
   createdAt: number;
   familyExpiresAt: number;
+  /**
+   * P1-004 v6 (P0-2): the SIWE authorization expiry (epoch seconds) that the
+   * family MUST NOT outlive. Every access JWT minted during refresh MUST be
+   * clamped to this boundary as well. null when the SIWE message carried no
+   * expirationTime (family lives the full familyMaxLifetimeSec).
+   */
+  authorizationExpiresAt: number | null;
 }
 
 interface ActiveMeta {
@@ -72,16 +79,50 @@ export class RefreshTokenService {
    * Create a new family + issue the first refresh token. Called from the SIWE
    * verify flow on successful login. Returns the plaintext token (to set as a
    * cookie or return in the body depending on transport) plus family metadata.
+   *
+   * P1-004 v6 (P0-1): `walletId` MUST be the walletId actually verified by
+   * THIS SIWE login (never `user.wallets[0]`). An empty/missing walletId is a
+   * programming error and is rejected with an internal error — the family
+   * must never be bound to an unknown wallet.
+   *
+   * P1-004 v6 (P0-2): `authorizationExpiresAt` (SIWE expirationTime) clamps the
+   * family lifetime: familyExpiresAt = min(now + familyMaxLifetimeSec,
+   * authorizationExpiresAt). When null/absent the family lives the full
+   * familyMaxLifetimeSec (30d default). The boundary is stored in FamilyMeta so
+   * every access JWT minted during refresh can be clamped to it as well.
    */
   async issueFamily(params: {
     userId: string;
     walletId: string;
+    authorizationExpiresAt?: string | null;
   }): Promise<{ refreshToken: string; familyId: string; familyExpiresAt: number }> {
+    // P0-1: reject empty walletId — the family must never bind to an unknown wallet.
+    if (!params.walletId) {
+      throw AppError.internal('issueFamily requires a verified walletId', {
+        reason: 'WALLET_ID_REQUIRED',
+      });
+    }
+
     const cfg = env();
     const now = Math.floor(Date.now() / 1000);
     const familyId = randomUUID();
-    const familyExpiresAt = now + cfg.familyMaxLifetimeSec;
-    const ttl = familyExpiresAt - now;
+    const maxFamilyExpiresAt = now + cfg.familyMaxLifetimeSec;
+
+    // P0-2: clamp family lifetime to the SIWE authorization boundary when it is
+    // shorter than the configured 30d. This preserves the P1-002 SIWE absolute
+    // expiry — the refresh family MUST NOT outlive the user's signed authorization.
+    let authorizationExpiresAtSec: number | null = null;
+    if (params.authorizationExpiresAt) {
+      const parsed = Math.floor(new Date(params.authorizationExpiresAt).getTime() / 1000);
+      if (!Number.isNaN(parsed)) {
+        authorizationExpiresAtSec = parsed;
+      }
+    }
+    const familyExpiresAt =
+      authorizationExpiresAtSec !== null && authorizationExpiresAtSec < maxFamilyExpiresAt
+        ? authorizationExpiresAtSec
+        : maxFamilyExpiresAt;
+    const ttl = Math.max(familyExpiresAt - now, 1);
 
     const refreshToken = this.generateOpaque();
     const tokenHash = this.hashToken(refreshToken);
@@ -92,6 +133,7 @@ export class RefreshTokenService {
       status: 'ACTIVE',
       createdAt: now,
       familyExpiresAt,
+      authorizationExpiresAt: authorizationExpiresAtSec,
     };
     const activeMeta: ActiveMeta = { tokenHash, issuedAt: now };
 

@@ -141,9 +141,18 @@ export class AuthController {
     // SIWE login. This happens OUTSIDE the DB transaction (Redis write) so a
     // Redis hiccup does not roll back the login; if it fails the user still
     // has a valid access JWT for the short access lifetime and can re-login.
+    //
+    // P1-004 v6 (P0-1): use the walletId actually verified by THIS SIWE login
+    // (result.verifiedWalletId), NOT `result.user.wallets[0]` which is
+    // order-dependent and could bind the refresh family to the wrong wallet
+    // when the user owns multiple wallets (test A).
+    // P1-004 v6 (P0-2): pass the SIWE authorization expiry so the family
+    // lifetime is clamped to min(now + 30d, authorizationExpiresAt) and every
+    // access JWT minted during refresh stays under the SIWE boundary (test B).
     const { refreshToken, familyExpiresAt } = await this.refreshTokens.issueFamily({
       userId: result.user.id,
-      walletId: result.user.wallets[0]?.id ?? '',
+      walletId: result.verifiedWalletId,
+      authorizationExpiresAt: result.authorizationExpiresAt,
     });
 
     // P1-004 v5+ FINAL: legacy dual-mode is removed. TransportMiddleware has
@@ -305,9 +314,20 @@ export class AuthController {
         reason: AuthFailReason.REFRESH_TOKEN_INVALID,
       });
     }
+    // P1-004 v6 (P0-2): clamp the new access JWT to the SIWE authorization
+    // boundary stored in the family. JwtAuthService.sign honours
+    // absoluteExpiresAtIso (clamps exp to the earlier of JWT-TTL and SIWE exp).
+    // The stored value is epoch seconds; JwtAuthService expects an ISO string.
+    // When null (no SIWE expirationTime), undefined is passed so the JWT uses
+    // its configured TTL (test C: family still max 30d).
+    const absoluteExpiresAtIso =
+      fam?.authorizationExpiresAt !== null && fam?.authorizationExpiresAt !== undefined
+        ? new Date(fam.authorizationExpiresAt * 1000).toISOString()
+        : undefined;
     const { token: accessToken, payload } = await this.jwtAuth.sign({
       userId,
       walletId: fam?.walletId,
+      absoluteExpiresAtIso,
     });
 
     await this.audit.recordRefreshSuccess({ userId, familyId: outcome.familyId, ...ctx });
