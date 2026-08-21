@@ -12,6 +12,7 @@
 
 import { AuthSessionCoordinator, type SessionState } from './AuthSessionCoordinator';
 import type { SiweWalletClient, VerifyResponseUser, LoginConnector } from '@/lib/siwe-client';
+import type { Address } from 'viem';
 
 // ============================================================================
 // Fake SiweWalletClient — 模拟 me()/refresh()/login()/logout() 的各种响应
@@ -92,10 +93,20 @@ function makeFakeClient(resps: FakeResponses): {
       return { loggedOut: true };
     },
     clearSession(): void {},
+    setConnector(): void {}, // P1-005 修订：login(connector) 会调 setConnector
     token: undefined,
     // SiweWalletClient 构造签名兼容（测试不实际调用 connector）
   } as unknown as SiweWalletClient;
   return { client, calls };
+}
+
+/** 构造一个 fake LoginConnector（仅 login 签名需要；Coordinator.login(connector) 注入）。 */
+function makeFakeConnector(): LoginConnector {
+  return {
+    connect: async () => ({ address: '0xabc' as Address, chainId: 1 }),
+    signMessage: async () => '0x' as `0x${string}`,
+    resolveChain: () => ({ chain: 'ETH', network: 'mainnet' }),
+  };
 }
 
 /** 收集 Coordinator 广播的状态序列。 */
@@ -252,6 +263,21 @@ describe('P1-005 AuthSessionCoordinator.restore()', () => {
     // subscribe 推送初始 initializing，restore 无 client 直接转 unauthenticated
     expect(states.map((s) => s.status)).toEqual(['initializing', 'unauthenticated']);
     expect(co.getState().status).toBe('unauthenticated');
+  });
+
+  it('R10 SiweWalletClient connector 可选 + setConnector；login 无 connector 抛错（Fix 1）', async () => {
+    // 验证 me/refresh/logout 不依赖 connector，仅 login 需要：
+    //   - new SiweWalletClient() 无 connector 不抛
+    //   - setConnector 可后续注入
+    //   - login 在调 http 前即抛 "LoginConnector not set"（不发请求）
+    const { SiweWalletClient } = require('@/lib/siwe-client');
+    const client = new SiweWalletClient(); // 无 connector，默认 authApi
+    expect(typeof client.setConnector).toBe('function');
+    expect(typeof client.me).toBe('function');
+    expect(typeof client.refresh).toBe('function');
+    expect(typeof client.logout).toBe('function');
+    // login 无 connector → 在发请求前抛错（不触发网络）
+    await expect(client.login()).rejects.toThrow(/LoginConnector not set/);
   });
 });
 
@@ -419,7 +445,7 @@ describe('P1-005 AuthSessionCoordinator.handleForbidden()', () => {
 // ============================================================================
 
 describe('P1-005 AuthSessionCoordinator.login()/logout()', () => {
-  it('L01 login 200 → authenticated', async () => {
+  it('L01 login(connector) 200 → authenticated', async () => {
     const co = newCoordinator();
     const { client } = makeFakeClient({
       login: { status: 200, user: makeUser('u-login') },
@@ -429,7 +455,7 @@ describe('P1-005 AuthSessionCoordinator.login()/logout()', () => {
     await co.restore();
     expect(co.getState().status).toBe('unauthenticated');
 
-    const user = await co.login();
+    const user = await co.login(makeFakeConnector());
     expect(user.id).toBe('u-login');
     expect(co.getState().status).toBe('authenticated');
   });
@@ -443,7 +469,7 @@ describe('P1-005 AuthSessionCoordinator.login()/logout()', () => {
     co.registerClient(client);
     await co.restore();
 
-    await expect(co.login()).rejects.toThrow();
+    await expect(co.login(makeFakeConnector())).rejects.toThrow();
     expect(co.getState().status).toBe('unauthenticated');
   });
 

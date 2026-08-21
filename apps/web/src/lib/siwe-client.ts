@@ -32,8 +32,15 @@
 //     caller can retry once; on 401/403 the session is cleared and the user must
 //     re-authenticate via SIWE.
 //
+// P1-005 修订（session restore）：
+//   - connector（钱包连接器）仅在 login() 签名时需要；me/refresh/logout 不依赖它。
+//   - 因此 connector 改为可选构造参数：应用启动即可 `new SiweWalletClient()`（无 connector）
+//     并调用 me/refresh/logout 恢复会话；登录页在调用 login() 前通过 setConnector() 注入。
+//   - 消除"必须先连钱包才能 restore"的缺陷：restore 在 AuthProvider mount 时立即执行。
+//
 // Usage:
-//   const client = new SiweWalletClient({ api, connector: wagmiConnector() });
+//   const client = new SiweWalletClient(); // 默认 authApi，无 connector，可 me/refresh/logout
+//   client.setConnector(wagmiConnector()); // 登录前注入
 //   const { user } = await client.login();
 //   await client.refresh(); // rotate the refresh cookie before access expiry
 // ============================================================================
@@ -155,12 +162,26 @@ export class SiweWalletClient {
   /** Cached CSRF token (Double Submit Cookie). Cleared on logout. */
   private csrfToken: string | undefined;
 
+  /**
+   * 钱包连接器。P1-005 修订：改为可选 + 可后续注入。
+   * me/refresh/logout 不需要 connector；仅 login() 签名时需要。
+   * 应用启动即可无 connector 构造（用于 restore），登录页通过 setConnector 注入。
+   */
+  private connector: LoginConnector | undefined;
+
   constructor(
-    private readonly connector: LoginConnector,
+    connector?: LoginConnector,
     private readonly http: AxiosInstance = defaultApi,
     /** In-memory session store; persists for page lifetime only. */
     private readonly session: { token?: string } = {},
-  ) {}
+  ) {
+    this.connector = connector;
+  }
+
+  /** 登录前注入钱包连接器（仅 login 签名需要）。 */
+  setConnector(connector: LoginConnector): void {
+    this.connector = connector;
+  }
 
   get token(): string | undefined {
     return this.session.token;
@@ -228,6 +249,9 @@ export class SiweWalletClient {
   }
 
   async login(requestId?: string): Promise<{ token?: string; user: VerifyResponseUser }> {
+    if (!this.connector) {
+      throw new Error('LoginConnector not set; call setConnector() before login()');
+    }
     const { address, chainId } = await this.connector.connect();
     const chain = this.connector.resolveChain(chainId) ?? CHAIN_TO_BACKEND[chainId];
     if (!chain) throw new Error(`unsupported chain id: ${chainId}`);

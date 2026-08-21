@@ -1,5 +1,6 @@
 import axios, { type AxiosError, type AxiosRequestConfig } from 'axios';
 import { authCoordinator } from '@/auth/AuthSessionCoordinator';
+import { extractReason, isSessionInvalidationReason } from './auth-reasons';
 
 /**
  * Pre-configured Axios client for the API. Base URL comes from
@@ -12,7 +13,9 @@ import { authCoordinator } from '@/auth/AuthSessionCoordinator';
  * P1-005: 装 401/403 response 拦截器 → 调 AuthSessionCoordinator。
  * - 401（非 /auth/* 请求）→ Coordinator.handleUnauthorized(原请求配置)
  *   Coordinator 完成 single-flight refresh + /auth/me 判定后，由本拦截器重试原请求。
- * - 403 REUSED/REVOKED → Coordinator.handleForbidden()
+ * - 403 仅当 error.details.reason 属于会话失效原因（REFRESH_TOKEN_REUSED/REVOKED 等）
+ *   才 Coordinator.handleForbidden()（清会话 + 回登录）；普通业务 403 原样 reject，
+ *   保持 authenticated（Fix 2）。
  *
  * ⚠️ 强制约束 B：本实例仅供业务请求使用；Coordinator/SiweWalletClient 必须用 authApi
  *    （无 401 拦截器），否则会形成 api.ts → Coordinator → siwe-client → api.ts 循环。
@@ -35,9 +38,11 @@ api.interceptors.response.use(
     const status = error.response?.status;
     const originalRequest = error.config;
 
-    // 403 REUSED/REVOKED → 清状态 + redirect /login
+    // 403 仅会话失效原因才清会话；普通业务 403 原样 reject，保持 authenticated（Fix 2）
     if (status === 403) {
-      authCoordinator.handleForbidden();
+      if (isSessionInvalidationReason(extractReason(error))) {
+        authCoordinator.handleForbidden();
+      }
       return Promise.reject(error);
     }
 

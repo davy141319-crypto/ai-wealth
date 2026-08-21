@@ -11,6 +11,12 @@
 //   3. handleUnauthorizedRestore()：初始化期 401 → 单次 refresh（不广播 refreshing）
 //   4. handleForbidden()：403 REUSED/REVOKED → 清状态 → /login
 //
+// P1-005 修订（session restore）：
+//   - 模块导出的单例 authCoordinator 在创建后立即注册一个默认 SiweWalletClient（无 connector）。
+//     这样应用启动（AuthProvider mount）即可调用 me/refresh/logout 恢复会话，
+//     不再依赖用户先连接钱包。钱包 connector 仅 login() 签名时需要，由 login(connector) 注入。
+//   - registerClient 仍保留：测试可注入 fake client；生产也可覆盖（一般不需要）。
+//
 // 依赖（强制约束 B）：
 //   - 仅使用 SiweWalletClient（其内部用 authApi，无 401 拦截器）
 //   - 禁止使用业务 api.ts（会形成循环依赖）
@@ -23,7 +29,7 @@
 // ============================================================================
 
 import type { AxiosRequestConfig } from 'axios';
-import type { SiweWalletClient, VerifyResponseUser } from '@/lib/siwe-client';
+import { SiweWalletClient, type VerifyResponseUser, type LoginConnector } from '@/lib/siwe-client';
 
 /** Coordinator 广播的会话状态。AuthProvider 订阅并派生 UI 状态。 */
 export type SessionState =
@@ -261,10 +267,12 @@ export class AuthSessionCoordinator {
 
   /**
    * 用户发起 SIWE 登录。调用方（AuthProvider）负责设置 'authenticating' UI 状态。
+   * connector 由登录页注入（仅 login 签名需要）；me/refresh/logout 不依赖它。
    * 成功 → notify authenticated；失败 → notify unauthenticated。
    */
-  async login(requestId?: string): Promise<VerifyResponseUser> {
+  async login(connector: LoginConnector, requestId?: string): Promise<VerifyResponseUser> {
     if (!this.client) throw new Error('SiweWalletClient not registered');
+    this.client.setConnector(connector);
     const { user } = await this.client.login(requestId);
     this.notify({ status: 'authenticated', user });
     return user;
@@ -282,10 +290,25 @@ export class AuthSessionCoordinator {
       this.notify({ status: 'unauthenticated', user: null });
     }
   }
+
+  /**
+   * 仅测试用：重置单例状态（restoreStarted / inflight / 状态回 initializing），
+   * 使连续的 React 集成测试互不影响。生产代码不调用。
+   * 注意：不重置已注册的 client（测试通过 registerClient 注入 fake）。
+   */
+  reset(): void {
+    this.restoreStarted = false;
+    this.inflightRefresh = null;
+    this.notify({ status: 'initializing', user: null });
+  }
 }
 
 /**
  * 模块级单例。整个应用共享同一个 Coordinator。
  * axios 拦截器（api.ts）和 AuthProvider 都引用这个实例。
+ *
+ * P1-005 修订：创建后立即注册默认 SiweWalletClient（无 connector），使应用启动即可
+ * 调用 me/refresh/logout 恢复会话——不再依赖用户先连接钱包。
  */
 export const authCoordinator = new AuthSessionCoordinator();
+authCoordinator.registerClient(new SiweWalletClient());

@@ -4,11 +4,15 @@
 // P1-005 — Login 页面接入真实 SIWE
 //
 // 使用 wagmi useAccount / useSignMessage + SiweWalletClient connector。
-// 调 useAuth().login()，成功后 redirect /dashboard（或 ?next=）。
+// 调 useAuth().login(connector)，成功后 redirect（?next= 经安全校验，非法 fallback /dashboard）。
 //
 // 注意：useSearchParams() 在 Next.js 14 静态预渲染时必须位于 <Suspense> 边界内，
 // 否则 build 会报 "useSearchParams() should be wrapped in a suspense boundary"。
 // 因此本文件拆为 LoginPage（默认导出，提供 Suspense 外壳）+ LoginContent（实际表单）。
+//
+// P1-005 修订（Fix 1 + Fix 3）：
+//   - 登录不再调用 registerClient；Coordinator 单例已持默认 client，login(connector) 注入 connector。
+//   - ?next= 经 safeRedirectTarget 校验，仅放行本站安全相对路径（Fix 3）。
 // ============================================================================
 
 import { Suspense, useState, useEffect, useRef } from 'react';
@@ -16,7 +20,8 @@ import { Alert, Button, Card, Space, Spin, Typography } from 'antd';
 import { WalletOutlined } from '@ant-design/icons';
 import { useAccount, useSignMessage, useConnect } from 'wagmi';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useAuth, useRegisterAuthClient } from '@/auth/AuthProvider';
+import { useAuth } from '@/auth/AuthProvider';
+import { safeRedirectTarget } from '@/lib/safe-redirect';
 import type { Address } from 'viem';
 import type { LoginConnector } from '@/lib/siwe-client';
 
@@ -36,7 +41,6 @@ const CHAIN_TO_BACKEND: Record<number, { chain: string; network: string }> = {
 
 function LoginContent() {
   const { login, status } = useAuth();
-  const registerClient = useRegisterAuthClient();
   const router = useRouter();
   const params = useSearchParams();
   const { address, chainId, isConnected } = useAccount();
@@ -54,7 +58,8 @@ function LoginContent() {
     latestChain.current = chainId;
   }, [chainId]);
 
-  const next = params.get('next') || '/dashboard';
+  // Fix 3：?next= 安全校验，非法值 fallback /dashboard
+  const next = safeRedirectTarget(params.get('next'));
 
   /** 构造 LoginConnector，桥接 wagmi → SiweWalletClient。 */
   function buildConnector(): LoginConnector {
@@ -79,7 +84,6 @@ function LoginContent() {
     setError(null);
     try {
       const connector = buildConnector();
-      registerClient(connector);
       await login(connector);
       router.replace(next);
     } catch (err) {
