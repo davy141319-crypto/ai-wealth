@@ -118,9 +118,122 @@ describe('loadEnv', () => {
       expect(cfg.csrfHeaderName).toBe('X-MY-CSRF');
     });
 
-    it('falls back to lax for invalid SameSite values', () => {
+    it('throws for invalid SameSite values (never silently downgrades)', () => {
       setEnv({ COOKIE_SAMESITE: 'bogus' });
-      expect(loadEnv('api').cookieSameSite).toBe('lax');
+      expect(() => loadEnv('api')).toThrow(/COOKIE_SAMESITE must be one of/);
+    });
+
+    it('accepts explicit SameSite=none (with Secure required by browser)', () => {
+      setEnv({ COOKIE_SAMESITE: 'none', COOKIE_SECURE: 'true' });
+      expect(loadEnv('api').cookieSameSite).toBe('none');
+    });
+  });
+
+  describe('production cookie security fail-fast (P1-003)', () => {
+    // Helper: set NODE_ENV=production + a valid base, then apply overrides.
+    // Explicitly clears ALL cookie vars first so prior tests' overrides
+    // (COOKIE_DOMAIN='.example.com' etc.) don't leak into the next test via
+    // process.env — loadEnv() reads process.env directly.
+    function setProdEnv(overrides: Record<string, string | undefined> = {}): void {
+      setEnv({
+        NODE_ENV: 'production',
+        COOKIE_NAME: undefined,
+        CSRF_COOKIE_NAME: undefined,
+        COOKIE_SECURE: undefined,
+        COOKIE_PATH: undefined,
+        COOKIE_DOMAIN: undefined,
+        COOKIE_SAMESITE: undefined,
+        ...overrides,
+      });
+    }
+
+    it('PASS: valid production config (correct defaults) boots without error', () => {
+      setProdEnv();
+      const cfg = loadEnv('api');
+      expect(cfg.cookieName).toBe('__Host-accesstoken');
+      expect(cfg.csrfCookieName).toBe('__Host-csrf');
+      expect(cfg.cookieSecure).toBe(true);
+      expect(cfg.cookiePath).toBe('/');
+      expect(cfg.cookieDomain).toBe('');
+      expect(cfg.cookieSameSite).toBe('lax');
+    });
+
+    it('PASS: explicit valid production values are accepted', () => {
+      setProdEnv({
+        COOKIE_NAME: '__Host-accesstoken',
+        CSRF_COOKIE_NAME: '__Host-csrf',
+        COOKIE_SECURE: 'true',
+        COOKIE_PATH: '/',
+        COOKIE_DOMAIN: '',
+        COOKIE_SAMESITE: 'lax',
+      });
+      expect(() => loadEnv('api')).not.toThrow();
+    });
+
+    it('FAIL: COOKIE_SECURE=false in production throws', () => {
+      setProdEnv({ COOKIE_SECURE: 'false' });
+      expect(() => loadEnv('api')).toThrow(/COOKIE_SECURE must be "true" in production/);
+    });
+
+    it('FAIL: non-empty COOKIE_DOMAIN in production throws', () => {
+      setProdEnv({ COOKIE_DOMAIN: '.example.com' });
+      expect(() => loadEnv('api')).toThrow(/COOKIE_DOMAIN must be empty in production/);
+    });
+
+    it('FAIL: COOKIE_PATH != "/" in production throws', () => {
+      setProdEnv({ COOKIE_PATH: '/api' });
+      expect(() => loadEnv('api')).toThrow(/COOKIE_PATH must be "\/" in production/);
+    });
+
+    it('FAIL: non-__Host COOKIE_NAME in production throws', () => {
+      setProdEnv({ COOKIE_NAME: 'access_token' });
+      expect(() => loadEnv('api')).toThrow(
+        /COOKIE_NAME must be "__Host-accesstoken" in production/,
+      );
+    });
+
+    it('FAIL: non-__Host CSRF_COOKIE_NAME in production throws', () => {
+      setProdEnv({ CSRF_COOKIE_NAME: 'csrf' });
+      expect(() => loadEnv('api')).toThrow(/CSRF_COOKIE_NAME must be "__Host-csrf" in production/);
+    });
+
+    it('FAIL: COOKIE_SAMESITE != "lax" in production throws', () => {
+      setProdEnv({ COOKIE_SAMESITE: 'strict' });
+      expect(() => loadEnv('api')).toThrow(/COOKIE_SAMESITE must be "lax" in production/);
+    });
+
+    it('FAIL: multiple violations are all reported in one error', () => {
+      setProdEnv({
+        COOKIE_NAME: 'access_token',
+        COOKIE_SECURE: 'false',
+        COOKIE_DOMAIN: '.evil.com',
+        COOKIE_PATH: '/api',
+        COOKIE_SAMESITE: 'none',
+      });
+      expect(() => loadEnv('api')).toThrow(/COOKIE_NAME must be/);
+      expect(() => loadEnv('api')).toThrow(/COOKIE_SECURE must be/);
+      expect(() => loadEnv('api')).toThrow(/COOKIE_DOMAIN must be empty/);
+      expect(() => loadEnv('api')).toThrow(/COOKIE_PATH must be/);
+      expect(() => loadEnv('api')).toThrow(/COOKIE_SAMESITE must be/);
+    });
+
+    it('dev/test still allows custom cookie config (no production enforcement)', () => {
+      // development: plain names, Secure=false, custom Domain/Path, strict — all OK
+      setEnv({
+        NODE_ENV: 'development',
+        COOKIE_NAME: 'custom_at',
+        CSRF_COOKIE_NAME: 'custom_csrf',
+        COOKIE_SECURE: 'false',
+        COOKIE_PATH: '/api',
+        COOKIE_DOMAIN: '.example.com',
+        COOKIE_SAMESITE: 'strict',
+      });
+      const cfg = loadEnv('api');
+      expect(cfg.cookieName).toBe('custom_at');
+      expect(cfg.cookieSecure).toBe(false);
+      expect(cfg.cookiePath).toBe('/api');
+      expect(cfg.cookieDomain).toBe('.example.com');
+      expect(cfg.cookieSameSite).toBe('strict');
     });
   });
 });
