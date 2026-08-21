@@ -39,10 +39,13 @@ export class JwtAuthGuard implements CanActivate {
     try {
       payload = await this.jwtAuth.verify(token);
     } catch (err) {
-      const reason =
-        err && typeof err === 'object' && 'reason' in err
-          ? ((err as any).reason as AuthFailReason)
-          : AuthFailReason.TOKEN_INVALID;
+      let reason = AuthFailReason.TOKEN_INVALID;
+      if (err && typeof err === 'object' && 'reason' in err) {
+        const maybe = (err as { reason?: unknown }).reason;
+        if (typeof maybe === 'string' && Object.values<string>(AuthFailReason).includes(maybe)) {
+          reason = maybe as AuthFailReason;
+        }
+      }
       throw AppError.unauthorized('Unauthorized', { reason });
     }
     req.auth = {
