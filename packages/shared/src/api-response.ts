@@ -40,12 +40,23 @@ export function fail(error: AppError | Error): ApiErrorResponse {
   const isProd = process.env.NODE_ENV === 'production';
   const code = isApp ? error.code : AppErrorCode.INTERNAL_ERROR;
   const message = !isApp && isProd ? 'Internal Server Error' : error.message;
+  let details: unknown | undefined;
+  if (isApp) {
+    if (error.details !== undefined) {
+      details = error.details;
+    } else if (error.reason !== undefined) {
+      // For auth / business errors, the machine-readable `reason` lives on the
+      // error itself; expose it as `details.reason` so clients can branch on
+      // a stable location (r.body.error.details.reason).
+      details = { reason: error.reason };
+    }
+  }
   return {
     success: false,
     error: {
       code,
       message,
-      ...(isApp && error.details !== undefined ? { details: error.details } : {}),
+      ...(details !== undefined ? { details } : {}),
     },
     timestamp: new Date().toISOString(),
   };

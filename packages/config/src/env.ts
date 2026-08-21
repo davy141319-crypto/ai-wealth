@@ -33,6 +33,16 @@ export interface EnvConfig {
   workerConcurrency: number;
   workerPort: number;
   blockchainPort: number;
+  /** Allowed SIWE domain whitelist (default: WEB_APP_URL host). */
+  siweDomain: string;
+  /** Allowed SIWE URI whitelist (default: WEB_APP_URL). */
+  siweUri: string;
+  /** Human-readable statement embedded in SIWE messages. */
+  siweStatement: string;
+  /** AuthNonce TTL in seconds (default 300 = 5 min). */
+  siweNonceTtlSec: number;
+  /** Max allowed issuedAt clock skew in seconds (default 300). */
+  siweClockSkewSec: number;
 }
 
 /** Fatal configuration error — crashes the process at boot by design. */
@@ -82,6 +92,16 @@ const REQUIRED_BY_PRESET: Record<ServicePreset, string[]> = {
   blockchain: ['REDIS_URL'],
 };
 
+/** Extract the host portion from a URL. Returns the string unchanged if parse fails. */
+function hostOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.host;
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Load and validate environment for the given service preset.
  * @param preset which service is booting — controls which vars are required.
@@ -102,6 +122,11 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
     );
   }
 
+  const webAppUrl = optional('WEB_APP_URL', '');
+  const siweDomain = optional('SIWE_DOMAIN', webAppUrl ? hostOf(webAppUrl) : 'localhost');
+  const siweUri = optional('SIWE_URI', webAppUrl || 'http://localhost:3000');
+  const siweStatement = optional('SIWE_STATEMENT', 'Sign in with Ethereum to AI Wealth DApp.');
+
   return {
     nodeEnv,
     isProd: nodeEnv === 'production',
@@ -113,13 +138,18 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
     jwtExpiresIn: optional('JWT_EXPIRES_IN', '3600s'),
     apiPort: asInt('API_PORT', 4000),
     apiPrefix: optional('API_PREFIX', 'api'),
-    webAppUrl: optional('WEB_APP_URL', ''),
+    webAppUrl,
     adminAppUrl: optional('ADMIN_APP_URL', ''),
     nextPublicApiUrl: optional('NEXT_PUBLIC_API_URL', ''),
     nextPublicAppUrl: optional('NEXT_PUBLIC_APP_URL', ''),
     workerConcurrency: asInt('WORKER_CONCURRENCY', 4),
     workerPort: asInt('WORKER_PORT', 4001),
     blockchainPort: asInt('BLOCKCHAIN_PORT', 4002),
+    siweDomain,
+    siweUri,
+    siweStatement,
+    siweNonceTtlSec: asInt('SIWE_NONCE_TTL_SEC', 300),
+    siweClockSkewSec: asInt('SIWE_CLOCK_SKEW_SEC', 300),
   };
 }
 
@@ -143,4 +173,13 @@ export function env(preset: ServicePreset = 'api'): EnvConfig {
     );
   }
   return cached;
+}
+
+/**
+ * Reset cached config — TEST ONLY helper. Never call in production code.
+ * Used in Jest so different `process.env` values take effect across suites.
+ */
+export function _resetEnvCache(): void {
+  cached = null;
+  cachedPreset = null;
 }

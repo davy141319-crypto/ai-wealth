@@ -3,6 +3,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { RedisModule } from './common/redis/redis.module';
 import { HealthModule } from './health/health.module';
+import { AuthModule } from './auth/auth.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
@@ -12,6 +13,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     RedisModule,
     HealthModule,
+    AuthModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

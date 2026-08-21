@@ -63,6 +63,14 @@ export class Repositories {
    * Run `fn` inside a Prisma transaction with a fresh Repositories bound to
    * the transaction client. The transaction commits iff fn resolves; any throw
    * rolls back. Use this for multi-table writes that must be atomic.
+   *
+   * Static form: `Repositories.transaction(fn)` — uses the singleton prisma
+   * client (i.e. opens a brand-new transaction).
+   *
+   * Instance form: `repos.transaction(fn)` — delegates to the static form so
+   * DI-injected Repositories instances still get real Prisma transaction
+   * semantics in production; tests may provide an instance override that
+   * snapshots/rolls back an in-memory DB.
    */
   static async transaction<T>(
     fn: (repos: Repositories) => Promise<T>,
@@ -72,6 +80,14 @@ export class Repositories {
       async (tx: Prisma.TransactionClient) => fn(new Repositories(tx)),
       opts,
     );
+  }
+
+  /** Instance-level transaction — delegates to Repositories.transaction(). */
+  transaction<T>(
+    fn: (repos: Repositories) => Promise<T>,
+    opts?: { timeout?: number; maxWait?: number },
+  ): Promise<T> {
+    return Repositories.transaction(fn, opts);
   }
 }
 

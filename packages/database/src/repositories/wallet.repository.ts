@@ -10,7 +10,7 @@ import { prisma } from '../client';
 import { normalizePagination, type PaginationInput, type SortDirection } from '../types';
 
 export interface WalletCreateInput {
-  userId: string;
+  userId?: string | null;
   address: string;
   chain: Chain;
   network: string;
@@ -19,6 +19,7 @@ export interface WalletCreateInput {
 }
 
 export interface WalletUpdateInput {
+  userId?: string | null;
   status?: WalletStatus;
   isPrimary?: boolean;
 }
@@ -93,7 +94,25 @@ export class WalletRepository {
   }
 
   update(id: string, input: WalletUpdateInput): Promise<Wallet> {
-    return this.db.wallet.update({ where: { id }, data: { ...input } });
+    const data: Prisma.WalletUpdateInput = {};
+    if (input.userId !== undefined) {
+      data.user = input.userId === null ? { disconnect: true } : { connect: { id: input.userId } };
+    }
+    if (input.status !== undefined) data.status = input.status;
+    if (input.isPrimary !== undefined) data.isPrimary = input.isPrimary;
+    return this.db.wallet.update({ where: { id }, data });
+  }
+
+  /**
+   * Atomically bind a user to an unbound wallet.
+   * @throws if wallet is already bound to a different user (caller checks).
+   */
+  bindUser(id: string, userId: string, status?: WalletStatus): Promise<Wallet> {
+    const data: Prisma.WalletUpdateInput = {
+      user: { connect: { id: userId } },
+    };
+    if (status) data.status = status;
+    return this.db.wallet.update({ where: { id }, data });
   }
 
   listByUser(userId: string): Promise<Wallet[]> {

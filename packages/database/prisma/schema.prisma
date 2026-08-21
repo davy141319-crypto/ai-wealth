@@ -110,12 +110,12 @@ model User {
 // ----------------------------------------------------------------------------
 model Wallet {
   id         String       @id @default(uuid()) @db.Uuid
-  userId     String       @map("user_id") @db.Uuid
-  user       User         @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  userId     String?      @map("user_id") @db.Uuid
+  user       User?        @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   address    String       @db.VarChar(64)
   chain      Chain
   network    String       @db.VarChar(32) // e.g. "mainnet", "sepolia", "trc20-main"
-  status     WalletStatus @default(CONNECTED)
+  status     WalletStatus @default(DISCONNECTED)
   isPrimary  Boolean      @default(false) @map("is_primary")
 
   createdAt DateTime @default(now()) @map("created_at")
