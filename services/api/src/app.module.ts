@@ -4,6 +4,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { RedisModule } from './common/redis/redis.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
+import { AdminModule } from './admin/admin.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
@@ -14,6 +15,8 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
     RedisModule,
     HealthModule,
     AuthModule,
+    // P1-006 — Backend RBAC admin endpoints (imports AuthModule for JwtAuthGuard).
+    AdminModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

@@ -112,6 +112,12 @@ export function parseDurationToSeconds(input: string | number | undefined): numb
     AuditService,
     RefreshTokenService,
     JwtModule,
+    // P1-006 — Backend RBAC: expose JwtAuthGuard so AdminModule (which imports
+    // AuthModule) can apply it on admin routes WITHOUT re-declaring the guard
+    // or re-registering JwtModule/JwtAuthService. AuthzContext + @AuthzUser()
+    // are TypeScript source exports from ./authz-context (NOT Nest exports —
+    // interfaces/decorators are compile-time symbols, not injectable providers).
+    JwtAuthGuard,
   ],
 })
 export class AuthModule implements NestModule {

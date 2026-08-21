@@ -375,7 +375,14 @@ describeIntegration('FK cascade strategy', () => {
     expect(await prisma.authNonce.findUnique({ where: { id: an.id } })).toBeNull();
   });
 
-  it('a user with a wallet cannot be deleted (RESTRICT) until the wallet is removed', async () => {
+  // P1-002 contract (ON DELETE SET NULL on wallets.user_id):
+  //   deleting a user NULLs the wallet.user_id FK column instead of
+  //   preventing the delete (RESTRICT). This was the real behavior since the
+  //   P1-002 migration but this test previously asserted RESTRICT (a stale
+  //   copy from the P1-001 era). Corrected here in PR#7 to match the frozen
+  //   P1-002 behavior — wallet rows are preserved (audit/SIWE proof intact)
+  //   with userId nulled; wallet identities/audit logs also preserved.
+  it('deleting a user SET NULLs wallet.user_id (P1-002 contract) and preserves the wallet', async () => {
     const user = await makeUser();
     const w = await repos.wallet.create({
       userId: user.id,
@@ -384,15 +391,26 @@ describeIntegration('FK cascade strategy', () => {
       network: 'sepolia',
     });
     createdWallets.push(w.id);
+    const wi = await repos.walletIdentity.create({
+      walletId: w.id,
+      identityType: 'SIWE',
+    });
 
-    await expect(prisma.user.delete({ where: { id: user.id } })).rejects.toThrow(
-      /foreign key|restrict/i,
-    );
-
-    // After removing the wallet, the user can be deleted.
-    await prisma.wallet.delete({ where: { id: w.id } });
+    // Deleting the user succeeds (NOT a RESTRICT violation).
     await prisma.user.delete({ where: { id: user.id } });
     createdUsers = createdUsers.filter((id) => id !== user.id);
+
+    // Wallet row is preserved and its user_id is now NULL.
+    const surviving = await prisma.wallet.findUnique({ where: { id: w.id } });
+    expect(surviving).not.toBeNull();
+    expect(surviving!.userId).toBeNull();
+
+    // Wallet identity is preserved (its FK is ON DELETE CASCADE on wallet_id,
+    // not on user_id, so the wallet surviving keeps the identity intact).
+    const survivingIdentity = await prisma.walletIdentity.findUnique({
+      where: { id: wi.id },
+    });
+    expect(survivingIdentity).not.toBeNull();
   });
 });
 

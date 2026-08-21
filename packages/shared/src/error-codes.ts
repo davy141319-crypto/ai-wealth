@@ -56,6 +56,29 @@ export enum AuthFailReason {
   ORIGIN_NOT_ALLOWED = 'AUTH_ORIGIN_NOT_ALLOWED',
 }
 
+/**
+ * P1-006 — Backend RBAC authorization failure reasons.
+ *
+ * These are surfaced into AuditLog.metadata.reasonCode (never into HTTP
+ * responses — clients only see the generic FORBIDDEN/INTERNAL_ERROR envelope).
+ * Keep values immutable across releases: renames break historical audit
+ * queries.
+ *
+ * Distinction from AuthFailReason: AuthFailReason is about AUTHENTICATION
+ * (who are you?); AuthzFailReason is about AUTHORIZATION (are you allowed to?).
+ *
+ * `AUTHZ_ROLE_LOOKUP_FAILED` is the ONE reason that maps to 5xx (infrastructure
+ * failure, not a permission denial) — every other value maps to 403.
+ */
+export enum AuthzFailReason {
+  AUTHZ_NO_AUTH_CONTEXT = 'AUTHZ_NO_AUTH_CONTEXT',
+  AUTHZ_ROLE_METADATA_MISSING = 'AUTHZ_ROLE_METADATA_MISSING',
+  AUTHZ_USER_NOT_FOUND = 'AUTHZ_USER_NOT_FOUND',
+  AUTHZ_USER_INACTIVE = 'AUTHZ_USER_INACTIVE',
+  AUTHZ_ROLE_INSUFFICIENT = 'AUTHZ_ROLE_INSUFFICIENT',
+  AUTHZ_ROLE_LOOKUP_FAILED = 'AUTHZ_ROLE_LOOKUP_FAILED',
+}
+
 /** AuditLog action names. Stable values; never rename. */
 export enum AuditAction {
   AUTH_LOGIN_SUCCESS = 'AUTH_LOGIN_SUCCESS',
@@ -70,6 +93,13 @@ export enum AuditAction {
   AUTH_SESSION_REVOKED = 'AUTH_SESSION_REVOKED',
   AUTH_REFRESH_BODY_IGNORED = 'AUTH_REFRESH_BODY_IGNORED',
   AUTH_TRANSPORT_CONFLICT = 'AUTH_TRANSPORT_CONFLICT',
+  // P1-006 — Backend RBAC decision audit (application-level only).
+  // Provisioning ops actions (AUTHZ_ROLE_GRANTED / AUTHZ_ROLE_REVOKED) are
+  // written by the controlled provisioning SQL transaction, NOT by application
+  // code, so they are intentionally NOT added here (AuditLog.action is a
+  // string column and accepts those values without an enum entry).
+  AUTHZ_DECISION_DENIED = 'AUTHZ_DECISION_DENIED',
+  AUTHZ_DECISION_ALLOWED = 'AUTHZ_DECISION_ALLOWED',
 }
 
 export class AppError extends Error {

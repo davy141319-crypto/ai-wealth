@@ -31,6 +31,7 @@ import { IdempotencyKeyRepository } from './idempotency-key.repository';
 import { SystemConfigRepository } from './system-config.repository';
 
 export { UserRepository } from './user.repository';
+export type { AuthorizationContext } from './user.repository';
 export { WalletRepository } from './wallet.repository';
 export { WalletIdentityRepository } from './wallet-identity.repository';
 export { AuthNonceRepository } from './auth-nonce.repository';
