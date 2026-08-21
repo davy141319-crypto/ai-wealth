@@ -21,6 +21,9 @@ import { AuditService } from './audit.service';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { CookieAuthService } from './cookie-auth.service';
+import { CsrfService } from './csrf.service';
+import { CsrfGuard } from './csrf.guard';
 import { APP_GUARD } from '@nestjs/core';
 import { Repositories } from '@ai-wealth/database';
 
@@ -81,8 +84,14 @@ export function parseDurationToSeconds(input: string | number | undefined): numb
     JwtAuthService,
     AuditService,
     AuthService,
+    CookieAuthService,
+    CsrfService,
     // Route-level guard (opted-in via @UseGuards on controllers).
     JwtAuthGuard,
+    // Global CSRF guard — enforces Double Submit Cookie on state-changing
+    // requests only when an access cookie is present (Bearer-only clients are
+    // exempt). See csrf.guard.ts for the exemption rules.
+    { provide: APP_GUARD, useClass: CsrfGuard },
     // APP_GUARD for throttler is already installed globally at AppModule.
     // Do NOT install a global JwtAuthGuard APP_GUARD — /auth/nonce and
     // /auth/verify plus /health must remain open.
@@ -90,6 +99,3 @@ export function parseDurationToSeconds(input: string | number | undefined): numb
   exports: [JwtAuthService, AuthService, NonceService, AuditService, JwtModule],
 })
 export class AuthModule {}
-
-// Import APP_GUARD once to silence tree-shaker warnings; unused actual.
-void APP_GUARD;

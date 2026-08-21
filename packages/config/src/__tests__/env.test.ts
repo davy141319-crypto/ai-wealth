@@ -1,4 +1,4 @@
-import { loadEnv } from '../env';
+import { loadEnv, _resetEnvCache } from '../env';
 
 describe('loadEnv', () => {
   const base = {
@@ -18,6 +18,8 @@ describe('loadEnv', () => {
         process.env[k] = v;
       }
     });
+    // loadEnv() caches the first call per process — reset between tests.
+    _resetEnvCache();
   }
 
   it('parses required env vars with sensible defaults', () => {
@@ -73,5 +75,52 @@ describe('loadEnv', () => {
   it('worker preset still throws when REDIS_URL is missing', () => {
     setEnv({ REDIS_URL: undefined });
     expect(() => loadEnv('worker')).toThrow(/REDIS_URL/);
+  });
+
+  describe('cookie / csrf config (P1-003)', () => {
+    it('uses __Host- prefixed names and Secure=true in production', () => {
+      setEnv({ NODE_ENV: 'production' });
+      const cfg = loadEnv('api');
+      expect(cfg.cookieName).toBe('__Host-accesstoken');
+      expect(cfg.csrfCookieName).toBe('__Host-csrf');
+      expect(cfg.cookieSecure).toBe(true);
+      expect(cfg.cookieSameSite).toBe('lax');
+      expect(cfg.cookiePath).toBe('/');
+      expect(cfg.cookieDomain).toBe('');
+      expect(cfg.csrfHeaderName).toBe('X-CSRF-TOKEN');
+    });
+
+    it('uses plain names and Secure=false in development', () => {
+      setEnv({ NODE_ENV: 'development' });
+      const cfg = loadEnv('api');
+      expect(cfg.cookieName).toBe('access_token');
+      expect(cfg.csrfCookieName).toBe('csrf');
+      expect(cfg.cookieSecure).toBe(false);
+    });
+
+    it('honours explicit COOKIE_* overrides', () => {
+      setEnv({
+        COOKIE_NAME: 'custom_at',
+        CSRF_COOKIE_NAME: 'custom_csrf',
+        COOKIE_SECURE: 'true',
+        COOKIE_SAMESITE: 'strict',
+        COOKIE_PATH: '/api',
+        COOKIE_DOMAIN: '.example.com',
+        CSRF_HEADER_NAME: 'X-MY-CSRF',
+      });
+      const cfg = loadEnv('api');
+      expect(cfg.cookieName).toBe('custom_at');
+      expect(cfg.csrfCookieName).toBe('custom_csrf');
+      expect(cfg.cookieSecure).toBe(true);
+      expect(cfg.cookieSameSite).toBe('strict');
+      expect(cfg.cookiePath).toBe('/api');
+      expect(cfg.cookieDomain).toBe('.example.com');
+      expect(cfg.csrfHeaderName).toBe('X-MY-CSRF');
+    });
+
+    it('falls back to lax for invalid SameSite values', () => {
+      setEnv({ COOKIE_SAMESITE: 'bogus' });
+      expect(loadEnv('api').cookieSameSite).toBe('lax');
+    });
   });
 });

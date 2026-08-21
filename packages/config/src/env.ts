@@ -43,6 +43,24 @@ export interface EnvConfig {
   siweNonceTtlSec: number;
   /** Max allowed issuedAt clock skew in seconds (default 300). */
   siweClockSkewSec: number;
+  /**
+   * Access-token cookie name. Production uses the `__Host-` prefix (requires
+   * HTTPS, Path=/, no Domain) to bind the cookie to the current host; dev/test
+   * use the plain name so it works over localhost HTTP.
+   */
+  cookieName: string;
+  /** CSRF token cookie name (same `__Host-` strategy as access cookie). */
+  csrfCookieName: string;
+  /** Cookie Domain attribute. Empty string means "do not set" (host-only). */
+  cookieDomain: string;
+  /** Cookie Secure flag (true in production over HTTPS, false in dev/test). */
+  cookieSecure: boolean;
+  /** Cookie SameSite attribute ('lax' | 'strict' | 'none'). */
+  cookieSameSite: 'lax' | 'strict' | 'none';
+  /** Cookie Path attribute. `__Host-` cookies must use '/'. */
+  cookiePath: string;
+  /** Header name clients use to submit the CSRF token (Double Submit Cookie). */
+  csrfHeaderName: string;
 }
 
 /** Fatal configuration error — crashes the process at boot by design. */
@@ -127,9 +145,20 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
   const siweUri = optional('SIWE_URI', webAppUrl || 'http://localhost:3000');
   const siweStatement = optional('SIWE_STATEMENT', 'Sign in with Ethereum to AI Wealth DApp.');
 
+  const isProd = nodeEnv === 'production';
+  // Cookie/CSRF config — `__Host-` prefix in production requires HTTPS + Path=/
+  // + no Domain; dev/test fall back to plain names over localhost HTTP.
+  const cookieName = optional('COOKIE_NAME', isProd ? '__Host-accesstoken' : 'access_token');
+  const csrfCookieName = optional('CSRF_COOKIE_NAME', isProd ? '__Host-csrf' : 'csrf');
+  const cookieSameSiteRaw = optional('COOKIE_SAMESITE', 'lax').toLowerCase();
+  const cookieSameSite =
+    cookieSameSiteRaw === 'strict' || cookieSameSiteRaw === 'none'
+      ? (cookieSameSiteRaw as 'strict' | 'none')
+      : 'lax';
+
   return {
     nodeEnv,
-    isProd: nodeEnv === 'production',
+    isProd,
     // Read every var regardless of preset so callers that do use them get the
     // real value when present (empty string when absent — never throws).
     databaseUrl: optional('DATABASE_URL', ''),
@@ -150,6 +179,13 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
     siweStatement,
     siweNonceTtlSec: asInt('SIWE_NONCE_TTL_SEC', 300),
     siweClockSkewSec: asInt('SIWE_CLOCK_SKEW_SEC', 300),
+    cookieName,
+    csrfCookieName,
+    cookieDomain: optional('COOKIE_DOMAIN', ''),
+    cookieSecure: optional('COOKIE_SECURE', isProd ? 'true' : 'false').toLowerCase() === 'true',
+    cookieSameSite,
+    cookiePath: optional('COOKIE_PATH', '/'),
+    csrfHeaderName: optional('CSRF_HEADER_NAME', 'X-CSRF-TOKEN'),
   };
 }
 

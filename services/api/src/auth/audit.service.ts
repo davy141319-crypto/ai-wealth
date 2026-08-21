@@ -88,6 +88,25 @@ export class AuditService {
     });
   }
 
+  recordCsrfFailure(params: {
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+  }): Promise<void> {
+    return this.write(AuditAction.AUTH_CSRF_FAILURE, {
+      actor: null,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata: { reason: AuthFailReason.CSRF_TOKEN_INVALID },
+      // A CSRF rejection is a security FAILURE event — record success=false so
+      // audit consumers can filter failed security events. (The AuditService
+      // `write` default only treats AUTH_LOGIN_FAILURE as failure; pass it
+      // explicitly here because AUTH_CSRF_FAILURE is also a failure action.)
+      success: false,
+    });
+  }
+
   /**
    * Append an audit row and await it. Authentication / audit events are
    * always-on by policy so we treat write failure as a logged warning but
