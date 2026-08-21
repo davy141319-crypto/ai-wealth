@@ -1,16 +1,25 @@
 // ============================================================================
 // CsrfGuard — Double Submit Cookie enforcement for state-changing requests.
 //
-// Rules (per P1-003 spec):
+// Rules (P1-003 + P1-004):
 //   - Only applies to POST / PUT / PATCH / DELETE (state-changing verbs).
 //   - GET / HEAD / OPTIONS are always exempt.
 //   - Path exemptions (no CSRF required even on POST): /api/auth/nonce,
 //     /api/auth/verify (login, pre-session), /api/auth/csrf-token (issue).
-//   - Bearer-only clients are NOT subject to CSRF: if the request carries NO
-//     access-token cookie, the guard passes through (Bearer header alone is
-//     immune to CSRF). CSRF is enforced ONLY when an access cookie is present.
+//   - Bearer/api-only clients are NOT subject to CSRF: if the request carries
+//     NO auth cookie at all, the guard passes through. P1-004 extends the
+//     trigger condition: CSRF is enforced when an access cookie OR a refresh
+//     cookie is present (previously access-only). This is required so that
+//     /refresh (which uses the refresh cookie, access may be expired) and
+//     /logout (access OR refresh) are CSRF-protected in cookie mode.
 //   - When enforced: header[X-CSRF-TOKEN] must be non-empty AND equal to the
 //     csrf cookie value. Mismatch/absence → 403 CSRF_TOKEN_INVALID + audit.
+//
+// P1-004 ordering: TransportMiddleware runs BEFORE this guard and rejects
+// transport=api requests that carry a cookie (TRANSPORT_COOKIE_CONFLICT), so by
+// the time CsrfGuard runs, an api-transport request genuinely has no cookie
+// and is correctly exempt; a cookie-transport request with a cookie present is
+// enforced.
 //
 // Comparison is plain string equality (no regex) — tokens are opaque random
 // bytes, not user input that needs pattern validation.
@@ -56,11 +65,13 @@ export class CsrfGuard implements CanActivate {
     // Exempt pre-session auth endpoints (nonce / verify / csrf-token issue).
     if (EXEMPT_PATHS.has(path)) return true;
 
-    // Bearer-only clients carry no access cookie → not subject to CSRF.
-    // (A Bearer header alone cannot be sent by a cross-site form / fetch with
-    // credentials, so CSRF does not apply.)
+    // P1-004: enforce CSRF whenever ANY auth cookie credential is present
+    // (access OR refresh). Previously this was access-only, which left
+    // /refresh (refresh cookie, access may be expired) and /logout (refresh
+    // cookie) unprotected in cookie mode.
     const accessCookie = (req.cookies ?? {})[this.cfg.cookieName] as string | undefined;
-    if (!accessCookie) return true;
+    const refreshCookie = (req.cookies ?? {})[this.cfg.refreshCookieName] as string | undefined;
+    if (!accessCookie && !refreshCookie) return true; // Bearer/api-only → exempt
 
     // Cookie-based session present → enforce DSC.
     const headerName = this.cfg.csrfHeaderName.toLowerCase();

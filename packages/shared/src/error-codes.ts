@@ -41,6 +41,19 @@ export enum AuthFailReason {
   TOKEN_REVOKED = 'AUTH_TOKEN_REVOKED',
   NOT_AUTHENTICATED = 'AUTH_NOT_AUTHENTICATED',
   CSRF_TOKEN_INVALID = 'AUTH_CSRF_TOKEN_INVALID',
+  // P1-004 — refresh-token rotation + reuse detection. EXPIRED is intentionally
+  // absent: once a Redis key TTL elapses the lookup/family/used keys vanish, so
+  // the server CANNOT distinguish an expired token from a forged one. Both
+  // surface as REFRESH_TOKEN_INVALID and the client must re-authenticate.
+  REFRESH_TOKEN_INVALID = 'AUTH_REFRESH_TOKEN_INVALID',
+  REFRESH_TOKEN_REUSED = 'AUTH_REFRESH_TOKEN_REUSED',
+  REFRESH_TOKEN_REVOKED = 'AUTH_REFRESH_TOKEN_REVOKED',
+  REFRESH_RETRY = 'AUTH_REFRESH_RETRY',
+  // P1-004 — explicit transport mode (`X-Auth-Transport`) + Origin allowlist.
+  TRANSPORT_REQUIRED = 'AUTH_TRANSPORT_REQUIRED',
+  TRANSPORT_ORIGIN_CONFLICT = 'AUTH_TRANSPORT_ORIGIN_CONFLICT',
+  TRANSPORT_COOKIE_CONFLICT = 'AUTH_TRANSPORT_COOKIE_CONFLICT',
+  ORIGIN_NOT_ALLOWED = 'AUTH_ORIGIN_NOT_ALLOWED',
 }
 
 /** AuditLog action names. Stable values; never rename. */
@@ -49,6 +62,14 @@ export enum AuditAction {
   AUTH_LOGIN_FAILURE = 'AUTH_LOGIN_FAILURE',
   AUTH_LOGOUT = 'AUTH_LOGOUT',
   AUTH_CSRF_FAILURE = 'AUTH_CSRF_FAILURE',
+  // P1-004 — refresh-token rotation + reuse detection (additive only; existing
+  // AuditService methods/semantics unchanged per the P1-003 narrow exemption).
+  AUTH_REFRESH_SUCCESS = 'AUTH_REFRESH_SUCCESS',
+  AUTH_REFRESH_FAILURE = 'AUTH_REFRESH_FAILURE',
+  AUTH_REFRESH_REUSE = 'AUTH_REFRESH_REUSE',
+  AUTH_SESSION_REVOKED = 'AUTH_SESSION_REVOKED',
+  AUTH_REFRESH_BODY_IGNORED = 'AUTH_REFRESH_BODY_IGNORED',
+  AUTH_TRANSPORT_CONFLICT = 'AUTH_TRANSPORT_CONFLICT',
 }
 
 export class AppError extends Error {

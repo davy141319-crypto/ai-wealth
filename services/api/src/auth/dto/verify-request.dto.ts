@@ -1,5 +1,5 @@
-import { IsEnum, IsJWT, IsString, Matches } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsEnum, IsJWT, IsOptional, IsString, Matches } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { Chain } from '@ai-wealth/database';
 import { Transform } from 'class-transformer';
 
@@ -41,9 +41,23 @@ export class VerifyRequestDto {
 }
 
 export class VerifyResponseDto {
-  @ApiProperty({ description: 'HS256 JWT. Present in Authorization: Bearer header only.' })
+  @ApiPropertyOptional({
+    description:
+      'HS256 access JWT. Present in api transport responses only (body). ' +
+      'Cookie transport sets this as an HttpOnly cookie and omits it from the body.',
+  })
+  @IsOptional()
   @IsJWT()
-  accessToken!: string;
+  accessToken?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Opaque refresh token. Present in api transport responses only. ' +
+      'Cookie transport sets this as an HttpOnly cookie and omits it from the body.',
+  })
+  @IsOptional()
+  @IsString()
+  refreshToken?: string;
 
   @ApiProperty({ type: 'object', additionalProperties: true })
   user!: {

@@ -107,6 +107,121 @@ export class AuditService {
     });
   }
 
+  // --------------------------------------------------------------------------
+  // P1-004 — refresh-token rotation audit methods (ADDITIVE only).
+  // Per the P1-003 narrow exemption carried into P1-004, existing AuditService
+  // methods and the `write()` default semantics are NOT modified. These new
+  // methods reuse `write()` verbatim; reuse / failure events pass `success:false`
+  // explicitly so audit consumers can filter failed security events.
+  // --------------------------------------------------------------------------
+
+  recordRefreshSuccess(params: {
+    userId: string;
+    familyId: string;
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+  }): Promise<void> {
+    return this.write(AuditAction.AUTH_REFRESH_SUCCESS, {
+      actor: params.userId,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata: { familyId: params.familyId, rotatedAt: Date.now() },
+    });
+  }
+
+  recordRefreshFailure(params: {
+    reason: AuthFailReason | string;
+    userId?: string | null;
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const metadata: Record<string, unknown> = { reason: params.reason };
+    if (params.metadata) Object.assign(metadata, params.metadata);
+    return this.write(AuditAction.AUTH_REFRESH_FAILURE, {
+      actor: params.userId ?? null,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata,
+      success: false,
+    });
+  }
+
+  /** Reuse detected → entire family revoked. Always success=false. */
+  recordRefreshReuse(params: {
+    userId?: string | null;
+    familyId: string;
+    tokenHashPrefix: string;
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+  }): Promise<void> {
+    return this.write(AuditAction.AUTH_REFRESH_REUSE, {
+      actor: params.userId ?? null,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata: {
+        familyId: params.familyId,
+        tokenHashPrefix: params.tokenHashPrefix,
+        reason: AuthFailReason.REFRESH_TOKEN_REUSED,
+      },
+      success: false,
+    });
+  }
+
+  recordSessionRevoked(params: {
+    userId: string;
+    familyId?: string;
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+  }): Promise<void> {
+    return this.write(AuditAction.AUTH_SESSION_REVOKED, {
+      actor: params.userId,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata: { familyId: params.familyId ?? null, via: 'logout' },
+    });
+  }
+
+  /** Cookie + body both present in cookie mode — body ignored, cookie used. */
+  recordRefreshBodyIgnored(params: {
+    userId?: string | null;
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+  }): Promise<void> {
+    return this.write(AuditAction.AUTH_REFRESH_BODY_IGNORED, {
+      actor: params.userId ?? null,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata: { reason: 'cookie_over_body' },
+    });
+  }
+
+  /** transport=api while carrying an auth cookie — blocked before CSRF. */
+  recordTransportConflict(params: {
+    requestId?: string;
+    ip?: string;
+    userAgent?: string;
+  }): Promise<void> {
+    return this.write(AuditAction.AUTH_TRANSPORT_CONFLICT, {
+      actor: null,
+      requestId: params.requestId,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      metadata: { reason: AuthFailReason.TRANSPORT_COOKIE_CONFLICT },
+      success: false,
+    });
+  }
+
   /**
    * Append an audit row and await it. Authentication / audit events are
    * always-on by policy so we treat write failure as a logged warning but
