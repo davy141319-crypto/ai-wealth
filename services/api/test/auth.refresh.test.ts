@@ -38,6 +38,10 @@
 //   R27  family expired → old token → 401 INVALID
 //   R28  /refresh cookie mode no refresh cookie → 401 INVALID
 //   R29  api + carries access or refresh cookie → 403 TRANSPORT_COOKIE_CONFLICT (constraint A)
+//   R30  409 REFRESH_RETRY clears ONLY refresh cookie; access + csrf cookies untouched
+//        and the existing access JWT still authenticates /auth/me (v5+ FINAL fix-2)
+//   R31  refresh-rotation.lua is present in the compiled dist/ output so the API
+//        Docker image can load it at runtime (v5+ FINAL fix-3)
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -990,5 +994,75 @@ describe('P1-004 Refresh Token Rotation (R01-R29)', () => {
       .send({ refreshToken: 'some-body-token' });
     expect(r.status).toBe(403);
     expect(r.body.error.details?.reason).toBe(AuthFailReason.TRANSPORT_COOKIE_CONFLICT);
+  });
+
+  // -------------------------------------------------------------------------
+  // R30 — 409 REFRESH_RETRY clears ONLY the refresh cookie. The access JWT
+  // and CSRF cookies MUST remain intact, and the existing access JWT must
+  // still authenticate /auth/me. This verifies v5+ FINAL fix-2: a retry is
+  // a transient network condition, not a security event — logging the user
+  // out (clearing access/csrf) would be wrong.
+  // -------------------------------------------------------------------------
+  it('R30 409 REFRESH_RETRY clears ONLY refresh cookie; access JWT still works', async () => {
+    const { accessVal, refreshVal } = await loginCookie();
+    // First rotation succeeds (rotates the refresh token).
+    const r1 = await refreshCookie({ refreshVal });
+    expect(r1.status).toBe(200);
+    // Replay the OLD refresh token within the grace window → 409 RETRY.
+    const r2 = await refreshCookie({ refreshVal });
+    expect(r2.status).toBe(409);
+    expect(r2.body.error.details?.reason).toBe(AuthFailReason.REFRESH_RETRY);
+
+    // 409 response MUST clear ONLY the refresh cookie. Access + CSRF MUST NOT
+    // appear in the Set-Cookie deletion headers.
+    const setCookies = (r2.headers['set-cookie'] as string[] | undefined) ?? [];
+    const lower = setCookies.map((c) => c.toLowerCase());
+    // Refresh cookie IS cleared (Max-Age=0).
+    expect(lower.some((c) => c.startsWith(`${REFRESH_COOKIE}=`) && c.includes('max-age=0'))).toBe(
+      true,
+    );
+    // Access cookie is NOT in the deletion set.
+    expect(lower.some((c) => c.startsWith(`${ACCESS_COOKIE}=`))).toBe(false);
+    // CSRF cookie is NOT in the deletion set.
+    expect(lower.some((c) => c.startsWith(`${CSRF_COOKIE}=`))).toBe(false);
+
+    // The existing access JWT (from the original login) is STILL VALID — it
+    // was never rotated (refresh retry does not mint a new access token) and
+    // the access cookie was not cleared. /auth/me must succeed with it.
+    const me = await http.get('/auth/me').set('Cookie', [`${ACCESS_COOKIE}=${accessVal}`]);
+    expect(me.status).toBe(200);
+    expect(me.body.data).toBeTruthy();
+  });
+
+  // -------------------------------------------------------------------------
+  // R31 — refresh-rotation.lua must be present in the compiled dist/ output
+  // (services/api/dist/auth/refresh-rotation.lua) so the API Docker image can
+  // load it at runtime via `readFile(join(__dirname, 'refresh-rotation.lua'))`.
+  // This is a static build-artifact check — it does NOT need a running Redis.
+  // Verifies v5+ FINAL fix-3: nest-cli.json `assets` configuration copies the
+  // Lua script into dist during `nest build`. The test runs both locally and
+  // in CI (after the `build` step) so a regression that drops the asset copy
+  // is caught before Docker image publication.
+  // -------------------------------------------------------------------------
+  it('R31 refresh-rotation.lua is present in compiled dist/ (build asset copy)', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require('node:path') as typeof import('node:path');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require('node:fs') as typeof import('node:fs');
+    // __dirname in jest with ts-jest points at the test/ dir; the compiled
+    // dist sits at services/api/dist. Resolve robustly from this file's path.
+    const distLua = path.resolve(__dirname, '..', 'dist', 'auth', 'refresh-rotation.lua');
+    const srcLua = path.resolve(__dirname, '..', 'src', 'auth', 'refresh-rotation.lua');
+    // Source must always exist (it's committed).
+    expect(fs.existsSync(srcLua)).toBe(true);
+    // Compiled dist artifact must exist after `nest build`. This is the
+    // critical check — if nest-cli.json `assets` is removed or the glob is
+    // wrong, this assertion fails and the Docker image would break at runtime
+    // (RefreshTokenService falls back to '' and throws LUA_SCRIPT_MISSING).
+    expect(fs.existsSync(distLua)).toBe(true);
+    // The dist copy must contain the rotation script body (not an empty file).
+    const distContent = fs.readFileSync(distLua, 'utf8');
+    expect(distContent).toContain('P1-004 Refresh Token Rotation');
+    expect(distContent.length).toBeGreaterThan(500);
   });
 });

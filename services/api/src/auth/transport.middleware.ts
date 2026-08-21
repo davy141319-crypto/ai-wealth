@@ -2,7 +2,12 @@
 // TransportMiddleware — P1-004 explicit transport mode + Origin anti-downgrade.
 //
 // Enforces the X-Auth-Transport contract BEFORE CsrfGuard runs:
-//   - Requests MUST declare `X-Auth-Transport: cookie | api`; missing → 400.
+//   - Requests to /verify, /refresh, /logout MUST declare
+//     `X-Auth-Transport: cookie | api`; missing or invalid value → 400
+//     TRANSPORT_REQUIRED. (P1-004 v5+ FINAL: legacy dual-mode removed — there
+//     is no longer any "missing header ⇒ dual-mode" fallback. This eliminates
+//     the ambiguity where api-declared CSRF exemption could combine with an
+//     attached browser cookie.)
 //   - `isBrowserOrigin` is derived ONLY from the Origin/Referer header (never
 //     from User-Agent) checked against the WEB_APP_URL/ADMIN_APP_URL allowlist.
 //   - Transport × Origin matrix:
@@ -30,18 +35,13 @@ import { AuditService } from './audit.service';
 const TRANSPORT_ROUTES = new Set(['/auth/verify', '/auth/refresh', '/auth/logout']);
 
 /**
- * Transport modes:
- *   - 'cookie' / 'api' : explicit P1-004 transport declared via X-Auth-Transport;
- *     the full Origin × transport matrix + constraint A (api+cookie→403) applies.
- *   - 'legacy' : the header is MISSING on /verify or /logout. For backward
- *     compatibility with P1-002/P1-003 clients (and the unchanged T01-T15 /
- *     C01-C11 regression suites) these endpoints tolerate a missing header and
- *     fall back to P1-003 dual-mode behaviour (verify sets cookies + returns
- *     body tokens; logout clears cookies + runs LogoutGuard without
- *     constraint-A). /refresh is a NEW P1-004 endpoint and never tolerates a
- *     missing header (→ 400 TRANSPORT_REQUIRED, see R19).
+ * Transport modes (strict — no legacy fallback). The header MUST be present
+ * and equal to one of these values, otherwise the request is rejected with
+ * 400 TRANSPORT_REQUIRED. Pre-P1-004 clients (and the P1-002/P1-003 test
+ * suites) MUST be updated to send the header; no dual-mode compatibility is
+ * provided so that cookie-set + body-token ambiguity can never occur.
  */
-export type AuthTransport = 'cookie' | 'api' | 'legacy';
+export type AuthTransport = 'cookie' | 'api';
 
 /** Request augmented with transport metadata (intersection type, matches the
  *  pattern used by jwt-auth.guard.ts rather than module augmentation). */
@@ -67,25 +67,14 @@ export class TransportMiddleware implements NestMiddleware {
     }
 
     const transportRaw = (req.headers['x-auth-transport'] as string | undefined)?.toLowerCase();
-    // /refresh is a NEW P1-004 endpoint — the transport header is mandatory.
-    // /verify and /logout tolerate a MISSING header as 'legacy' for backward
-    // compatibility with P1-002/P1-003 clients (and the unchanged T01-T15 /
-    // C01-C11 regression suites): legacy verify returns dual-mode (cookies +
-    // body tokens), legacy logout clears cookies + runs LogoutGuard without
-    // constraint-A. An explicit 'cookie'/'api' value enforces the full
-    // P1-004 transport contract on every route.
-    const isRefresh = path === '/auth/refresh';
+    // v5+ FINAL: /verify, /refresh AND /logout all require an explicit
+    // transport header. A missing or invalid value → 400 TRANSPORT_REQUIRED.
+    // (Previously /verify and /logout tolerated a missing header as 'legacy'
+    // dual-mode; that path is removed to eliminate cookie+body ambiguity.)
     if (transportRaw !== 'cookie' && transportRaw !== 'api') {
-      if (isRefresh) {
-        throw AppError.badRequest('X-Auth-Transport header required (cookie | api)', {
-          reason: AuthFailReason.TRANSPORT_REQUIRED,
-        });
-      }
-      // Legacy mode: skip Origin matrix + constraint-A. CsrfGuard still runs
-      // (cookie-presence based) so cookie-mode CSRF protection is intact.
-      req.authTransport = 'legacy';
-      req.isBrowserOrigin = this.isBrowserOrigin(req);
-      return next();
+      throw AppError.badRequest('X-Auth-Transport header required (cookie | api)', {
+        reason: AuthFailReason.TRANSPORT_REQUIRED,
+      });
     }
     const transport: AuthTransport = transportRaw;
     const isBrowserOrigin = this.isBrowserOrigin(req);

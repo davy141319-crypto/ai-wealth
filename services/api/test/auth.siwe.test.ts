@@ -593,13 +593,21 @@ describe('P1-002 Wallet Authentication (15 scenarios)', () => {
     chain?: Chain;
     network?: string;
   }) {
-    return http.post('/auth/verify').send({
-      message: payload.message,
-      signature: payload.signature,
-      address: payload.address,
-      chain: payload.chain ?? 'ETH',
-      network: payload.network ?? 'mainnet',
-    });
+    // P1-004 v5+ FINAL: legacy transport mode removed — every /verify request
+    // MUST declare X-Auth-Transport. The T01-T15 suite uses api transport
+    // (tokens returned in the body; no cookies set) because the assertions
+    // check `r.body.data.accessToken`. No browser Origin is sent so the
+    // TransportMiddleware Origin × transport matrix passes (api + non-browser).
+    return http
+      .post('/auth/verify')
+      .set('X-Auth-Transport', 'api')
+      .send({
+        message: payload.message,
+        signature: payload.signature,
+        address: payload.address,
+        chain: payload.chain ?? 'ETH',
+        network: payload.network ?? 'mainnet',
+      });
   }
 
   async function login(
@@ -789,7 +797,12 @@ describe('P1-002 Wallet Authentication (15 scenarios)', () => {
   // ---------------------------- T13 ----------------------------
   it('T13 登出后 token 被 blocklist 拒绝，并记录 AUTH_LOGOUT 审计', async () => {
     const { token } = await login(alice);
-    const lout = await http.post('/auth/logout').set('Authorization', `Bearer ${token}`);
+    // P1-004 v5+ FINAL: /logout requires X-Auth-Transport. Use api mode
+    // (Bearer header, no cookies) — passes constraint A and CSRF exempt.
+    const lout = await http
+      .post('/auth/logout')
+      .set('X-Auth-Transport', 'api')
+      .set('Authorization', `Bearer ${token}`);
     expect(lout.status).toBe(200);
     expect(lout.body.success).toBe(true);
     expect(lout.body.data.loggedOut).toBe(true);
@@ -823,7 +836,11 @@ describe('P1-002 Wallet Authentication (15 scenarios)', () => {
     const me = await http.get('/auth/me');
     expect(me.status).toBe(401);
     expect(me.body.error.details?.reason).toBe(AuthFailReason.NOT_AUTHENTICATED);
-    const lout = await http.post('/auth/logout');
+    // P1-004 v5+ FINAL: /logout requires X-Auth-Transport. Use api mode with
+    // no credentials — LogoutGuard returns true (does not throw), controller
+    // sees both credentials invalid → 401 NOT_AUTHENTICATED (constraint B in
+    // api mode: no cookies to clear).
+    const lout = await http.post('/auth/logout').set('X-Auth-Transport', 'api');
     expect(lout.status).toBe(401);
     expect(lout.body.error.details?.reason).toBe(AuthFailReason.NOT_AUTHENTICATED);
   }, 30_000);

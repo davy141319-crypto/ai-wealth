@@ -161,6 +161,23 @@ export class CookieAuthService {
   }
 
   /**
+   * P1-004 v5+ FINAL: clear ONLY the refresh cookie, leaving the access and
+   * CSRF cookies untouched. Used on the 409 REFRESH_RETRY path — the user is
+   * merely being told to re-send with the current token; their access JWT is
+   * still valid (rotation did not happen, so the old access cookie is fine)
+   * and the CSRF token is unrelated to the refresh credential. Clearing all
+   * three cookies here would needlessly log the user out of an otherwise
+   * valid session just because a network retry happened.
+   *
+   * Reuses the same explicit Max-Age=0 + Expires=epoch deletion encoding as
+   * `clearAuthCookies` so the refresh cookie is unambiguously removed across
+   * browsers.
+   */
+  clearRefreshCookie(res: Response): void {
+    res.append('Set-Cookie', this.buildDeleteCookie(this.cfg.refreshCookieName, true));
+  }
+
+  /**
    * Build a Set-Cookie header value that deletes `name`. Emits both Max-Age=0
    * and Expires=epoch alongside the cookie's normal scoping attributes so the
    * browser matches and removes the exact cookie that was set.

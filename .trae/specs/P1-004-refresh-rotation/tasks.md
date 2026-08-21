@@ -43,3 +43,20 @@ Audit 窄豁免（沿用 P1-003）：仅 additive 新增 refresh 审计方法。
 - 测试：R11（cookie logout 均无效→清cookie+401）、R29（api+cookie→403）
 
 ## SPEC STATUS: LOCKED / READY FOR IMPLEMENTATION
+
+## v5+ FINAL FIX（3 项修复）
+
+- **修复 1**（legacy 删除）:
+  - `transport.middleware.ts`: 删除 `legacy` 分支；`/verify`、`/refresh`、`/logout` 缺失/非法 `X-Auth-Transport` 均 400 `TRANSPORT_REQUIRED`
+  - `auth.controller.ts`: /verify 删除 dual-mode 第三分支（不同时 set cookie 又 body 返回 token）；/logout 删除 legacy 兼容分支
+  - `auth.siwe.test.ts` (T01-T15): `verify()` helper 补 `X-Auth-Transport: api`；T13/T15 logout 补 `X-Auth-Transport: api`
+  - `auth.cookie-csrf.test.ts` (C01-C11): `verify()`/`login()` helper 支持 transport 参数（cookie 默认，C04/C07 用 api）；C05/C06/C09 logout 补 `X-Auth-Transport: cookie` + Origin；C08 补 `X-Auth-Transport: api`
+  - 原断言不改
+- **修复 2**（409 仅清 refresh cookie）:
+  - `cookie-auth.service.ts`: 新增 `clearRefreshCookie(res)` 方法（仅清 refresh cookie，Max-Age=0 + Expires=epoch）
+  - `auth.controller.ts`: /refresh retry 分支改用 `clearRefreshCookie`（原 `clearAuthCookies` 清三个）
+  - 新增 R30 测试：验证 409 后 access cookie 未清 + access JWT 仍可认证 /me
+- **修复 3**（Lua 脚本 dist 验证）:
+  - `nest-cli.json`: 配置 `compilerOptions.assets` 将 `**/*.lua` 复制到 dist
+  - 新增 R31 测试：验证 `dist/auth/refresh-rotation.lua` 存在 + 内容非空
+  - Dockerfile.api 不需改动（COPY services/api 整体覆盖 dist）

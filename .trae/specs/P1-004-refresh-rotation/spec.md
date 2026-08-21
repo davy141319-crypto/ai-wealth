@@ -13,9 +13,13 @@
 - v3: 旧 lookup 保留 / 统一 401 INVALID / Cookie 优先 / family 固定 30 天
 - v4: CsrfGuard 触发=access OR refresh cookie / logout 支持 access OR refresh / 显式 X-Auth-Transport / 删除 REFRESH_TOKEN_TTL_SEC
 - v5 (LOCKED): transport 分端点细化 / logout 始终清 cookie / Origin allowlist 防 transport 降级 + login-CSRF
-- **v5+ (FINAL, 本文档)**: 含 2 项额外强制约束：
+- v5+ (FINAL, 含 2 项额外强制约束):
   - 约束 A: transport=api 时若存在 access 或 refresh cookie → 在 CSRF 前 403 `TRANSPORT_COOKIE_CONFLICT`（禁止 "api 豁免 CSRF 但携带 cookie" 的歧义）
   - 约束 B: Cookie 模式 logout 两凭证均无效时，LogoutGuard 不得直接抛 401；必须让 Controller 继续执行，先清三 cookie 再返回 401。Guard 只附加凭证校验状态。
+- **v5+ FINAL FIX (3 项)**: legacy dual-mode 彻底删除 + 409 仅清 refresh cookie + Lua 脚本 build asset copy 验证
+  - **修复 1**: 删除 legacy transport。`/verify`、`/refresh`、`/logout` 缺失或非法 `X-Auth-Transport` 均 400 `TRANSPORT_REQUIRED`。不得同时 set cookie 又 body 返回 token。T01-T15/C01-C11 仅修改测试请求/helper 补正确 transport+Origin，原断言不改。
+  - **修复 2**: 409 `REFRESH_RETRY` 仅清 refresh cookie，不得清 access/csrf；新增 `clearRefreshCookie` 方法并加测试，确保现有 access 仍可用。
+  - **修复 3**: 验证 `refresh-rotation.lua` 在真实 build 后的 dist 及 API Docker 容器运行路径存在；新增运行时/CI 测试。配置 nest-cli.json `assets` copy。
 
 ## Goals
 
@@ -292,7 +296,7 @@ return {4, ''}  -- 统一 INVALID
 - 头：`X-Auth-Transport`（必须）。
 - cookie 模式：isBrowserOrigin=true；**必须有 refresh cookie**（否则 401 INVALID）；CSRF 强制；body 不含 token；成功 set 新 cookies + body `{user}`。
 - api 模式：无浏览器 Origin；约束 A：无 cookie；从 body 读 refresh；CSRF 豁免；body `{accessToken, refreshToken, user}`。
-- 409 RETRY（cookie 清 refresh cookie）；403 REUSED/REVOKED（清 cookies + 审计）；401 INVALID。
+- 409 RETRY（cookie 模式**仅清 refresh cookie**，access/csrf 不动；access JWT 仍可用）；403 REUSED/REVOKED（清 cookies + 审计）；401 INVALID。
 
 ### `POST /api/auth/logout`（修订，约束 B）
 
@@ -368,38 +372,40 @@ return {4, ''}  -- 统一 INVALID
 
 ## 测试计划 R01-R28
 
-| #                 | 场景                                                                               | 预期                              |
-| ----------------- | ---------------------------------------------------------------------------------- | --------------------------------- |
-| R01               | SIWE 登录 cookie 模式 + Origin in allowlist → set cookies，body 不含 token         | 200；body 仅 {user}               |
-| R02               | SIWE 登录 api 模式 + 无浏览器 Origin → body 含 token                               | 200；body 有 token；无 Set-Cookie |
-| R03               | 合法 refresh cookie 模式 → 新 cookies，旧 token USED，旧 lookup 保留               | 200；body 无 token                |
-| R04               | 合法 refresh api 模式 → body 含新 token                                            | 200                               |
-| R05               | 旧 token 宽限期内重试 → 409 RETRY                                                  | 409；不返回 token                 |
-| R06               | 旧 token 宽限期外复用 → 403 REUSED + 原子撤销 + 审计                               | 403                               |
-| R07               | 并发 refresh（同 token）                                                           | 一 200 一 409                     |
-| R08               | 第 3 次 used 命中 → 403 撤销                                                       | 403                               |
-| R09               | logout cookie 模式 + 有效 access → 撤销 jti + family + 清三 cookie                 | 200；三 cookie 清                 |
-| R10               | logout cookie 模式 + access 过期 + 有效 refresh → 撤销 family + 清 cookie + 200    | 200                               |
-| R11               | logout cookie 模式 + 两者均无效 → **清 cookie + 401**                              | 401；三 cookie 已清               |
-| R12               | logout api 模式 + 两者均无效 → 401（不清 cookie）                                  | 401                               |
-| R13               | cookie 模式 refresh 无 CSRF → 403 CSRF_TOKEN_INVALID                               | 403                               |
-| R14               | api 模式 refresh 无 CSRF → 通过                                                    | 200                               |
-| R15               | 伪造 refresh → 401 INVALID                                                         | 401                               |
-| R16               | refresh token 不在 body（cookie 模式）/log                                         | 无明文                            |
-| R17               | family 撤销后任何 token → 403 REVOKED                                              | 403                               |
-| R18               | cookie+body 同时有 refresh → Cookie 优先 + CSRF + body 忽略 + 审计                 | 200/403                           |
-| R19               | 缺 X-Auth-Transport → 400 TRANSPORT_REQUIRED                                       | 400                               |
-| R20               | api 模式 + 浏览器 Origin in allowlist → 403 TRANSPORT_ORIGIN_CONFLICT + 审计       | 403                               |
-| R21               | cookie 模式 + 无浏览器 Origin → 403 ORIGIN_NOT_ALLOWED                             | 403                               |
-| R22               | /verify cookie 模式 + Origin in allowlist → 通过（login-CSRF 放行）                | 200                               |
-| R23               | /verify cookie 模式 + Origin 不在 allowlist → 403 ORIGIN_NOT_ALLOWED（login-CSRF） | 403                               |
-| R24               | /verify cookie 模式 + 无 Origin/Referer → 403 ORIGIN_NOT_ALLOWED                   | 403                               |
-| R25               | api 模式 + 无浏览器 Origin → 通过                                                  | 200                               |
-| R26               | family 接近 30 天 → 新 key TTL=familyExpiresAt-now（短）                           | TTL < 30d                         |
-| R27               | family 到期后用旧 token → 401 INVALID                                              | 401                               |
-| R28               | /refresh cookie 模式无 refresh cookie → 401 INVALID                                | 401                               |
-| **R29**（约束 A） | **api 模式 + 携带 access 或 refresh cookie → 403 TRANSPORT_COOKIE_CONFLICT**       | 403                               |
-| 回归              | T01-T15 + C01-C11                                                                  | 全绿                              |
+| #                 | 场景                                                                               | 预期                                |
+| ----------------- | ---------------------------------------------------------------------------------- | ----------------------------------- |
+| R01               | SIWE 登录 cookie 模式 + Origin in allowlist → set cookies，body 不含 token         | 200；body 仅 {user}                 |
+| R02               | SIWE 登录 api 模式 + 无浏览器 Origin → body 含 token                               | 200；body 有 token；无 Set-Cookie   |
+| R03               | 合法 refresh cookie 模式 → 新 cookies，旧 token USED，旧 lookup 保留               | 200；body 无 token                  |
+| R04               | 合法 refresh api 模式 → body 含新 token                                            | 200                                 |
+| R05               | 旧 token 宽限期内重试 → 409 RETRY，仅清 refresh cookie（v5+ FINAL）                | 409；不返回 token；仅清 refresh     |
+| R06               | 旧 token 宽限期外复用 → 403 REUSED + 原子撤销 + 审计                               | 403                                 |
+| R07               | 并发 refresh（同 token）                                                           | 一 200 一 409                       |
+| R08               | 第 3 次 used 命中 → 403 撤销                                                       | 403                                 |
+| R09               | logout cookie 模式 + 有效 access → 撤销 jti + family + 清三 cookie                 | 200；三 cookie 清                   |
+| R10               | logout cookie 模式 + access 过期 + 有效 refresh → 撤销 family + 清 cookie + 200    | 200                                 |
+| R11               | logout cookie 模式 + 两者均无效 → **清 cookie + 401**                              | 401；三 cookie 已清                 |
+| R12               | logout api 模式 + 两者均无效 → 401（不清 cookie）                                  | 401                                 |
+| R13               | cookie 模式 refresh 无 CSRF → 403 CSRF_TOKEN_INVALID                               | 403                                 |
+| R14               | api 模式 refresh 无 CSRF → 通过                                                    | 200                                 |
+| R15               | 伪造 refresh → 401 INVALID                                                         | 401                                 |
+| R16               | refresh token 不在 body（cookie 模式）/log                                         | 无明文                              |
+| R17               | family 撤销后任何 token → 403 REVOKED                                              | 403                                 |
+| R18               | cookie+body 同时有 refresh → Cookie 优先 + CSRF + body 忽略 + 审计                 | 200/403                             |
+| R19               | 缺 X-Auth-Transport → 400 TRANSPORT_REQUIRED                                       | 400                                 |
+| R20               | api 模式 + 浏览器 Origin in allowlist → 403 TRANSPORT_ORIGIN_CONFLICT + 审计       | 403                                 |
+| R21               | cookie 模式 + 无浏览器 Origin → 403 ORIGIN_NOT_ALLOWED                             | 403                                 |
+| R22               | /verify cookie 模式 + Origin in allowlist → 通过（login-CSRF 放行）                | 200                                 |
+| R23               | /verify cookie 模式 + Origin 不在 allowlist → 403 ORIGIN_NOT_ALLOWED（login-CSRF） | 403                                 |
+| R24               | /verify cookie 模式 + 无 Origin/Referer → 403 ORIGIN_NOT_ALLOWED                   | 403                                 |
+| R25               | api 模式 + 无浏览器 Origin → 通过                                                  | 200                                 |
+| R26               | family 接近 30 天 → 新 key TTL=familyExpiresAt-now（短）                           | TTL < 30d                           |
+| R27               | family 到期后用旧 token → 401 INVALID                                              | 401                                 |
+| R28               | /refresh cookie 模式无 refresh cookie → 401 INVALID                                | 401                                 |
+| **R29**（约束 A） | **api 模式 + 携带 access 或 refresh cookie → 403 TRANSPORT_COOKIE_CONFLICT**       | 403                                 |
+| **R30**（修复 2） | **409 RETRY 仅清 refresh cookie；access JWT 仍可认证 /me**                         | 409；access/csrf 未清；/me 200      |
+| **R31**（修复 3） | **refresh-rotation.lua 在 dist/ 存在（nest build asset copy）**                    | dist/auth/refresh-rotation.lua 存在 |
+| 回归              | T01-T15 + C01-C11                                                                  | 全绿                                |
 
 ## AC 汇总
 
@@ -408,7 +414,7 @@ return {4, ''}  -- 统一 INVALID
 | AC-1                | SIWE 登录 cookie 模式 → set cookies，body 不含 token                                                                             |
 | AC-2                | SIWE 登录 api 模式 → body 含 token，不 set cookie                                                                                |
 | AC-3                | 合法 refresh → 新 token；旧 USED；旧 lookup 保留                                                                                 |
-| AC-4                | 宽限期内重试 → 409 RETRY，不返回 token                                                                                           |
+| AC-4                | 宽限期内重试 → 409 RETRY，不返回 token；cookie 模式**仅清 refresh cookie**（修复 2）                                             |
 | AC-5                | 宽限期外复用 → 403 REUSED + 原子撤销 + 审计                                                                                      |
 | AC-6                | 并发同 token → 一 200 一 409                                                                                                     |
 | AC-7                | 第 3 次 used → 403 撤销                                                                                                          |
@@ -435,6 +441,9 @@ return {4, ''}  -- 统一 INVALID
 | AC-28               | CI 10/10 + CodeQL 全绿                                                                                                           |
 | **AC-29**（约束 A） | **api 模式 + 携带 cookie → 在 CSRF 前 403 TRANSPORT_COOKIE_CONFLICT**                                                            |
 | **AC-30**（约束 B） | **LogoutGuard 不抛 401；Controller 先清 cookie 再返回**                                                                          |
+| **AC-31**（修复 1） | **legacy dual-mode 删除；/verify//refresh//logout 缺失/非法 transport 均 400；不同时 set cookie 又 body 返回 token**             |
+| **AC-32**（修复 2） | **409 RETRY 仅清 refresh cookie；access/csrf 不动；access JWT 仍可用**                                                           |
+| **AC-33**（修复 3） | **refresh-rotation.lua 在 dist/ + Docker 镜像运行路径存在（nest-cli.json assets copy）**                                         |
 
 ## 风险
 

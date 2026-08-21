@@ -146,7 +146,13 @@ export class AuthController {
       walletId: result.user.wallets[0]?.id ?? '',
     });
 
-    const transport = req.authTransport ?? 'legacy';
+    // P1-004 v5+ FINAL: legacy dual-mode is removed. TransportMiddleware has
+    // already rejected missing/invalid X-Auth-Transport with 400, so
+    // `transport` is always 'cookie' or 'api' here. cookie mode sets HttpOnly
+    // cookies and returns ONLY {user}; api mode returns tokens in the body and
+    // sets NO cookie. The two modes can never be combined (no request ever sets
+    // a cookie AND returns a body token).
+    const transport = req.authTransport ?? 'api';
     if (transport === 'cookie') {
       // Cookie mode: set both HttpOnly cookies; body carries ONLY {user}.
       this.cookieAuth.setAuthCookie(res, result.token);
@@ -167,33 +173,7 @@ export class AuthController {
         },
       } satisfies VerifyResponseDto);
     }
-    if (transport === 'api') {
-      // api mode: return tokens in body; no cookies set.
-      return ok({
-        accessToken: result.token,
-        refreshToken,
-        user: {
-          id: result.user.id,
-          status: result.user.status,
-          lastLoginAt: result.user.lastLoginAt?.toISOString() ?? null,
-          wallets: result.user.wallets.map((w) => ({
-            id: w.id,
-            address: w.address,
-            chain: w.chain,
-            network: w.network,
-            status: w.status,
-            isPrimary: w.isPrimary,
-          })),
-        },
-      } satisfies VerifyResponseDto);
-    }
-    // legacy mode (no X-Auth-Transport header): P1-003 dual-mode compatibility —
-    // set the access + refresh cookies AND return the tokens in the body. This
-    // keeps pre-P1-004 clients (and the unchanged T01-T15 / C01-C11 regression
-    // suites) working without declaring a transport. C02 asserts a cookie is
-    // set; C04 asserts a body token is present — dual mode satisfies both.
-    this.cookieAuth.setAuthCookie(res, result.token);
-    this.cookieAuth.setRefreshCookie(res, refreshToken, familyExpiresAt);
+    // api mode: return tokens in body; no cookies set.
     return ok({
       accessToken: result.token,
       refreshToken,
@@ -275,9 +255,15 @@ export class AuthController {
     }
     if (outcome.kind === 'retry') {
       // Network retry window — do NOT return a token (we don't store plaintext).
-      // Clear the refresh cookie in cookie mode so the client re-authenticates.
+      // P1-004 v5+ FINAL: in cookie mode clear ONLY the refresh cookie — the
+      // access JWT is still valid (rotation did not happen) and the CSRF token
+      // is unrelated to the refresh credential. Clearing access/csrf here would
+      // log the user out of a valid session just because a retry happened. The
+      // client MUST re-send with the current refresh token (looked up via the
+      // active pointer, which is now the rotated value the retry-eligible caller
+      // would have received if they had won the race).
       if (transport === 'cookie') {
-        this.cookieAuth.clearAuthCookies(res);
+        this.cookieAuth.clearRefreshCookie(res);
       }
       throw AppError.conflict('Refresh token recently used; retry with current token', {
         reason: AuthFailReason.REFRESH_RETRY,
@@ -412,14 +398,16 @@ export class AuthController {
     @Ip() ip?: string,
   ): Promise<ApiSuccessResponse<{ loggedOut: boolean }>> {
     const ctx = { requestId: requestIdHeader || undefined, ip, userAgent };
-    const transport = req.authTransport ?? 'legacy';
+    // P1-004 v5+ FINAL: legacy mode removed — transport is always 'cookie' or
+    // 'api' (TransportMiddleware already rejected missing/invalid headers).
+    const transport = req.authTransport ?? 'api';
     const creds = req.logoutCredentials;
 
-    // Constraint B: in cookie mode AND legacy (P1-003 compat) mode, ALWAYS
-    // clear the three cookies first, even if both credentials are invalid.
-    // LogoutGuard did not throw — the controller runs, clears cookies, then
-    // decides the response code. Legacy mode matches P1-003 (always cleared).
-    if (transport === 'cookie' || transport === 'legacy') {
+    // Constraint B: in cookie mode ALWAYS clear the three cookies first, even
+    // if both credentials are invalid. LogoutGuard did not throw — the
+    // controller runs, clears cookies, then decides the response code. api mode
+    // has no cookies to clear.
+    if (transport === 'cookie') {
       this.cookieAuth.clearAuthCookies(res);
     }
 
