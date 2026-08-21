@@ -18,9 +18,24 @@
 //   - The in-memory Bearer token is STILL set for backward compatibility —
 //     the server treats Bearer as priority over Cookie when both are present.
 //
+// P1-004 (Refresh rotation + explicit transport):
+//   - The browser declares `X-Auth-Transport: cookie` on verify / refresh /
+//     logout so the server sets HttpOnly cookies (access + refresh) and NEVER
+//     returns token plaintext in the body. The refresh token lives ONLY in the
+//     HttpOnly refresh cookie — it is never read by JS, never put in localStorage
+//     or a Bearer header, and never logged.
+//   - `login()` therefore no longer relies on a body `accessToken`; the session
+//     is carried by the access cookie. `accessToken` is kept OPTIONAL on the
+//     response type for api/legacy callers.
+//   - `refresh()` rotates the refresh cookie via POST /auth/refresh (empty body,
+//     CSRF enforced). On 409 RETRY the access cookie may still be valid, so the
+//     caller can retry once; on 401/403 the session is cleared and the user must
+//     re-authenticate via SIWE.
+//
 // Usage:
 //   const client = new SiweWalletClient({ api, connector: wagmiConnector() });
-//   const { token, user } = await client.login();
+//   const { user } = await client.login();
+//   await client.refresh(); // rotate the refresh cookie before access expiry
 // ============================================================================
 
 import type { Address, Chain as ViemChain, Hash } from 'viem';
@@ -28,6 +43,9 @@ import type { AxiosInstance } from 'axios';
 import { api as defaultApi } from './api';
 
 const CSRF_HEADER = 'X-CSRF-TOKEN';
+/** P1-004 explicit transport declaration. Browser = cookie. */
+const TRANSPORT_HEADER = 'X-Auth-Transport';
+const TRANSPORT_COOKIE = 'cookie';
 
 /** Local mirror of the server's ApiResponse envelope (avoids a shared import). */
 interface ApiResponseEnvelope<T> {
@@ -61,7 +79,18 @@ export interface VerifyResponseUser {
 }
 
 export interface VerifyResponse {
-  accessToken: string;
+  /**
+   * Access JWT. Present in api / legacy transport responses only. In cookie
+   * transport the server sets the access token as an HttpOnly cookie and omits
+   * it from the body — the browser session is carried by the cookie, not JS.
+   */
+  accessToken?: string;
+  /**
+   * Refresh token. Present in api / legacy transport responses only. In cookie
+   * transport the server sets it as an HttpOnly cookie and it is NEVER exposed
+   * to JS (so it can never leak into localStorage / logs / a Bearer header).
+   */
+  refreshToken?: string;
   user: VerifyResponseUser;
 }
 
@@ -156,11 +185,23 @@ export class SiweWalletClient {
     this.csrfToken = r.data.success ? r.data.data!.csrfToken : undefined;
   }
 
+  /**
+   * POST to an auth route. The browser always declares cookie transport so the
+   * server sets HttpOnly cookies and never returns token plaintext in the body.
+   * CSRF (Double Submit Cookie) is attached for state-changing requests.
+   *
+   * NOTE: in cookie transport the Bearer header is intentionally NOT sent —
+   * the access cookie carries the session. `session.token` is only populated
+   * in api/legacy mode; when present it is still attached for backward compat.
+   */
   private async post<T>(path: string, body: unknown): Promise<T> {
-    // verify is exempt (pre-session) but logout (cookie mode) requires CSRF.
-    // Fetching a token for verify too is harmless and keeps the path simple.
+    // verify is exempt (pre-session) but logout/refresh (cookie mode) require
+    // CSRF. Fetching a token for verify too is harmless and keeps the path simple.
     await this.ensureCsrfToken();
-    const headers: Record<string, string> = this.csrfToken ? { [CSRF_HEADER]: this.csrfToken } : {};
+    const headers: Record<string, string> = {
+      [TRANSPORT_HEADER]: TRANSPORT_COOKIE,
+    };
+    if (this.csrfToken) headers[CSRF_HEADER] = this.csrfToken;
     if (this.session.token) {
       headers.Authorization = `Bearer ${this.session.token}`;
     }
@@ -184,7 +225,7 @@ export class SiweWalletClient {
     return res;
   }
 
-  async login(requestId?: string): Promise<{ token: string; user: VerifyResponseUser }> {
+  async login(requestId?: string): Promise<{ token?: string; user: VerifyResponseUser }> {
     const { address, chainId } = await this.connector.connect();
     const chain = this.connector.resolveChain(chainId) ?? CHAIN_TO_BACKEND[chainId];
     if (!chain) throw new Error(`unsupported chain id: ${chainId}`);
@@ -214,8 +255,44 @@ export class SiweWalletClient {
       chain: chain.chain,
       network: chain.network,
     });
+    // Cookie transport: accessToken is absent from the body (HttpOnly cookie).
+    // Keep populating session.token for api/legacy callers; in cookie mode it
+    // stays undefined and the access cookie carries the session.
     this.session.token = resp.accessToken;
     return { token: resp.accessToken, user: resp.user };
+  }
+
+  /**
+   * P1-004: rotate the refresh token (HttpOnly refresh cookie). Sends an empty
+   * body — the refresh token is read from the cookie by the server, never from
+   * JS. CSRF is enforced (cookie transport). On success the server sets fresh
+   * access + refresh cookies.
+   *
+   * Error handling:
+   *   - 409 RETRY: the refresh token was just used (network retry). The access
+   *     cookie may still be valid, so the caller can retry once; the refresh
+   *     cookie was cleared by the server, so a second retry will 401 INVALID →
+   *     the caller should re-authenticate via `login()`.
+   *   - 401 INVALID / 403 REUSED / 403 REVOKED: the session is gone — clear and
+   *     re-authenticate via SIWE.
+   */
+  async refresh(): Promise<{ user: VerifyResponseUser }> {
+    try {
+      const resp = await this.post<VerifyResponse>('/auth/refresh', {});
+      return { user: resp.user };
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status;
+      if (status === 409) {
+        // Retry once — the rotation race resolved as RETRY; a fresh attempt may
+        // succeed if the client's refresh cookie is still the active one.
+        const resp = await this.post<VerifyResponse>('/auth/refresh', {});
+        return { user: resp.user };
+      }
+      // 401 / 403 — session revoked or invalid. Clear and propagate so the
+      // caller can re-run `login()`.
+      this.clearSession();
+      throw err;
+    }
   }
 }
 

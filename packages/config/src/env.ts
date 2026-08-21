@@ -61,6 +61,28 @@ export interface EnvConfig {
   cookiePath: string;
   /** Header name clients use to submit the CSRF token (Double Submit Cookie). */
   csrfHeaderName: string;
+  /**
+   * Refresh-token cookie name. Production uses `__Host-refreshtoken` (same
+   * __Host- prefix strategy as the access cookie); dev/test use a plain name.
+   * P1-004: holds the opaque rotating refresh token (never in body in cookie mode).
+   */
+  refreshCookieName: string;
+  /**
+   * Fixed maximum lifetime of a refresh-token family in seconds.
+   * A family is created on SIWE login and CANNOT be extended by rotation —
+   * every new key written during rotation uses TTL = `familyExpiresAt - now`
+   * (decrementing), so the family dies at a fixed point regardless of activity.
+   * Default 30 days (2592000s). The refresh token itself has NO independent TTL;
+   * its validity = Redis key existence = family remaining lifetime.
+   */
+  familyMaxLifetimeSec: number;
+  /** Reuse-detection retry grace window in seconds (default 30s).
+   *  Within this window after a rotation, a replayed used token is treated as a
+   *  network retry (409 RETRY) rather than theft. Past the window → REUSED. */
+  reuseGraceSec: number;
+  /** Max allowed replays of a used token within the grace window before it is
+   *  classified as theft (default 2 = tolerate 1 concurrency + 1 retry). */
+  maxRefreshRetry: number;
 }
 
 /** Fatal configuration error — crashes the process at boot by design. */
@@ -113,10 +135,12 @@ function asInt(name: string, fallback: number): number {
  */
 const PROD_COOKIE_NAME = '__Host-accesstoken';
 const PROD_CSRF_COOKIE_NAME = '__Host-csrf';
+const PROD_REFRESH_COOKIE_NAME = '__Host-refreshtoken';
 
 interface ProdCookieConfig {
   cookieName: string;
   csrfCookieName: string;
+  refreshCookieName: string;
   cookieDomain: string;
   cookieSecure: boolean;
   cookieSameSite: 'lax' | 'strict' | 'none';
@@ -138,6 +162,11 @@ function assertProductionCookieConfig(cfg: ProdCookieConfig): void {
   if (cfg.csrfCookieName !== PROD_CSRF_COOKIE_NAME) {
     violations.push(
       `CSRF_COOKIE_NAME must be "${PROD_CSRF_COOKIE_NAME}" in production, got: "${cfg.csrfCookieName}"`,
+    );
+  }
+  if (cfg.refreshCookieName !== PROD_REFRESH_COOKIE_NAME) {
+    violations.push(
+      `REFRESH_COOKIE_NAME must be "${PROD_REFRESH_COOKIE_NAME}" in production, got: "${cfg.refreshCookieName}"`,
     );
   }
   if (!cfg.cookieSecure) {
@@ -212,6 +241,12 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
   // + no Domain; dev/test fall back to plain names over localhost HTTP.
   const cookieName = optional('COOKIE_NAME', isProd ? PROD_COOKIE_NAME : 'access_token');
   const csrfCookieName = optional('CSRF_COOKIE_NAME', isProd ? PROD_CSRF_COOKIE_NAME : 'csrf');
+  // P1-004: refresh token cookie uses the same __Host- strategy in production.
+  // Holds the opaque rotating refresh token; never appears in body/log in cookie mode.
+  const refreshCookieName = optional(
+    'REFRESH_COOKIE_NAME',
+    isProd ? PROD_REFRESH_COOKIE_NAME : 'refresh_token',
+  );
   // COOKIE_SAMESITE: validate explicitly — NEVER silently downgrade an
   // unknown value to 'lax'. An invalid value is a configuration error and
   // must fail fast (otherwise a typo like 'laz' would silently weaken CSRF
@@ -242,6 +277,7 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
     assertProductionCookieConfig({
       cookieName,
       csrfCookieName,
+      refreshCookieName,
       cookieDomain,
       cookieSecure,
       cookieSameSite,
@@ -279,6 +315,14 @@ export function loadEnv(preset: ServicePreset = 'api'): EnvConfig {
     cookieSameSite,
     cookiePath,
     csrfHeaderName: optional('CSRF_HEADER_NAME', 'X-CSRF-TOKEN'),
+    refreshCookieName,
+    // P1-004: refresh-token family parameters. The family has a FIXED maximum
+    // lifetime (rotation never extends it); every new Redis key uses
+    // TTL = familyExpiresAt - now (decrementing). The refresh token itself has
+    // no independent TTL — its validity = Redis key existence.
+    familyMaxLifetimeSec: asInt('FAMILY_MAX_LIFETIME_SEC', 30 * 24 * 60 * 60),
+    reuseGraceSec: asInt('REUSE_GRACE_SEC', 30),
+    maxRefreshRetry: asInt('MAX_REFRESH_RETRY', 2),
   };
 }
 

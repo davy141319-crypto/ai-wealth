@@ -136,6 +136,16 @@ jobs:
           test -f services/blockchain/dist/main.js
           test -f apps/web/.next/BUILD_ID
           test -f apps/admin/dist/index.html
+      # P1-004 fix-3: refresh-rotation.lua MUST be copied into dist/auth/ by
+      # `nest build` (nest-cli.json compilerOptions.assets glob **/*.lua). If
+      # the glob is dropped or the file is renamed, RefreshTokenService throws
+      # LUA_SCRIPT_MISSING at runtime inside the API Docker container. This gate
+      # runs WHERE dist/ exists (after `pnpm run build` above), so it catches
+      # asset-copy regressions that the static R31 contract check cannot.
+      - name: Verify refresh-rotation.lua copied into dist (P1-004 fix-3)
+        run: |
+          test -f services/api/dist/auth/refresh-rotation.lua
+          echo "OK: refresh-rotation.lua present in dist/auth/"
 
   # ------------------------------------------------------ secret/secret scan --
   secret-scan:

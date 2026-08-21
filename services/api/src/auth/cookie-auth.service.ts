@@ -98,6 +98,38 @@ export class CookieAuthService {
   }
 
   /**
+   * P1-004: Set the refresh-token cookie. Holds the opaque rotating refresh
+   * token (never the JWT). HttpOnly + Secure + SameSite=Lax + __Host- in prod.
+   *
+   * Max-Age is the FAMILY's remaining lifetime (NOT a fixed refresh TTL —
+   * refresh token validity = Redis key existence = family remaining lifetime).
+   * The family has a FIXED maximum lifetime that rotation never extends, so
+   * the cookie's Max-Age shrinks as the family ages. familyExpiresAtSec is the
+   * unix-seconds expiry stamp captured at family creation; we compute
+   * maxAge = familyExpiresAt - now.
+   */
+  setRefreshCookie(res: Response, refreshToken: string, familyExpiresAtSec: number): void {
+    const maxAgeMs = Math.max(0, familyExpiresAtSec * 1000 - Date.now());
+    res.cookie(this.cfg.refreshCookieName, refreshToken, {
+      httpOnly: true,
+      secure: this.cfg.cookieSecure,
+      sameSite: this.cfg.cookieSameSite,
+      path: this.cfg.cookiePath,
+      ...(this.cfg.cookieDomain ? { domain: this.cfg.cookieDomain } : {}),
+      maxAge: maxAgeMs,
+    });
+  }
+
+  /**
+   * P1-004: Read the refresh token from the request cookies. Returns undefined
+   * when no refresh cookie is present (Bearer/api clients).
+   */
+  readRefreshCookie(req: { cookies?: Record<string, unknown> }): string | undefined {
+    const v = req.cookies?.[this.cfg.refreshCookieName];
+    return typeof v === 'string' && v.length > 0 ? v : undefined;
+  }
+
+  /**
    * Set the CSRF cookie. Non-HttpOnly so the browser can read it and echo the
    * value in the X-CSRF-TOKEN header (Double Submit Cookie pattern).
    */
@@ -112,10 +144,10 @@ export class CookieAuthService {
   }
 
   /**
-   * Clear both the access-token and CSRF cookies on logout. Deletion is made
-   * EXPLICIT by emitting BOTH `Max-Age=0` and `Expires=<epoch>` (plus the same
-   * Path/Domain/Secure/SameSite/HttpOnly used when setting the cookie) via a
-   * hand-built Set-Cookie header. Express's `res.clearCookie` / `res.cookie`
+   * Clear the access, CSRF, AND refresh (P1-004) cookies on logout. Deletion is
+   * made EXPLICIT by emitting BOTH `Max-Age=0` and `Expires=<epoch>` (plus the
+   * same Path/Domain/Secure/SameSite/HttpOnly used when setting the cookie) via
+   * a hand-built Set-Cookie header. Express's `res.clearCookie` / `res.cookie`
    * cannot emit both Max-Age=0 and Expires=epoch at once — when `maxAge` is
    * provided it overwrites `expires` with `now+maxAge`, and when `maxAge` is
    * omitted the serialiser skips `Max-Age` entirely. Building the header
@@ -125,6 +157,24 @@ export class CookieAuthService {
   clearAuthCookies(res: Response): void {
     res.append('Set-Cookie', this.buildDeleteCookie(this.cfg.cookieName, true));
     res.append('Set-Cookie', this.buildDeleteCookie(this.cfg.csrfCookieName, false));
+    res.append('Set-Cookie', this.buildDeleteCookie(this.cfg.refreshCookieName, true));
+  }
+
+  /**
+   * P1-004 v5+ FINAL: clear ONLY the refresh cookie, leaving the access and
+   * CSRF cookies untouched. Used on the 409 REFRESH_RETRY path — the user is
+   * merely being told to re-send with the current token; their access JWT is
+   * still valid (rotation did not happen, so the old access cookie is fine)
+   * and the CSRF token is unrelated to the refresh credential. Clearing all
+   * three cookies here would needlessly log the user out of an otherwise
+   * valid session just because a network retry happened.
+   *
+   * Reuses the same explicit Max-Age=0 + Expires=epoch deletion encoding as
+   * `clearAuthCookies` so the refresh cookie is unambiguously removed across
+   * browsers.
+   */
+  clearRefreshCookie(res: Response): void {
+    res.append('Set-Cookie', this.buildDeleteCookie(this.cfg.refreshCookieName, true));
   }
 
   /**

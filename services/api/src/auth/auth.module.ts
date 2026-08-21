@@ -11,7 +11,7 @@
 //     (NonceService, AuditService) which use DI fallback `= new Repositories()`.
 // ============================================================================
 
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { env } from '@ai-wealth/config';
 import { NonceService } from './nonce.service';
@@ -24,6 +24,9 @@ import { JwtAuthGuard } from './jwt-auth.guard';
 import { CookieAuthService } from './cookie-auth.service';
 import { CsrfService } from './csrf.service';
 import { CsrfGuard } from './csrf.guard';
+import { RefreshTokenService } from './refresh-token.service';
+import { TransportMiddleware } from './transport.middleware';
+import { LogoutGuard } from './logout.guard';
 import { APP_GUARD } from '@nestjs/core';
 import { Repositories } from '@ai-wealth/database';
 
@@ -86,6 +89,12 @@ export function parseDurationToSeconds(input: string | number | undefined): numb
     AuthService,
     CookieAuthService,
     CsrfService,
+    // P1-004: rotating refresh tokens with token-family reuse detection.
+    RefreshTokenService,
+    // P1-004: transport mode + Origin anti-downgrade middleware.
+    TransportMiddleware,
+    // P1-004: logout credential resolver (constraint B — does not throw).
+    LogoutGuard,
     // Route-level guard (opted-in via @UseGuards on controllers).
     JwtAuthGuard,
     // Global CSRF guard — enforces Double Submit Cookie on state-changing
@@ -96,6 +105,22 @@ export function parseDurationToSeconds(input: string | number | undefined): numb
     // Do NOT install a global JwtAuthGuard APP_GUARD — /auth/nonce and
     // /auth/verify plus /health must remain open.
   ],
-  exports: [JwtAuthService, AuthService, NonceService, AuditService, JwtModule],
+  exports: [
+    JwtAuthService,
+    AuthService,
+    NonceService,
+    AuditService,
+    RefreshTokenService,
+    JwtModule,
+  ],
 })
-export class AuthModule {}
+export class AuthModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    // P1-004: TransportMiddleware runs BEFORE the global CsrfGuard for the
+    // auth routes that declare a transport mode (verify/refresh/logout). It
+    // enforces X-Auth-Transport + Origin anti-downgrade + constraint A
+    // (api transport must not carry auth cookies), so CsrfGuard only ever sees
+    // a consistent transport decision.
+    consumer.apply(TransportMiddleware).forRoutes('auth/verify', 'auth/refresh', 'auth/logout');
+  }
+}

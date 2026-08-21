@@ -36,6 +36,12 @@ COPY services/api services/api
 # into node_modules for runtime use.
 RUN pnpm --filter @ai-wealth/shared --filter @ai-wealth/config --filter @ai-wealth/database run build
 RUN pnpm --filter @ai-wealth/api run build
+# P1-004 fix-3: refresh-rotation.lua MUST be copied into dist/auth/ by `nest build`
+# (nest-cli.json compilerOptions.assets glob **/*.lua). RefreshTokenService loads it
+# at runtime via readFile(join(__dirname, 'refresh-rotation.lua')) which resolves to
+# dist/auth/refresh-rotation.lua. If the asset copy is broken, the service throws
+# LUA_SCRIPT_MISSING on the first refresh. Fail the image build fast if missing.
+RUN test -f services/api/dist/auth/refresh-rotation.lua
 # Ensure the Prisma client is present for runtime (idempotent).
 RUN pnpm --filter @ai-wealth/database exec prisma generate
 

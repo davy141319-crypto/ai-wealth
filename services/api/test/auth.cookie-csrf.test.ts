@@ -413,14 +413,29 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
     return r.body.data;
   }
 
+  // P1-004 v5+ FINAL: legacy transport mode removed — every /verify request
+  // MUST declare X-Auth-Transport. The C01-C11 suite needs BOTH modes:
+  //   - cookie mode (default `login()`): sets access+refresh cookies; used by
+  //     C02/C03/C05/C06/C09/C10 which assert an access cookie is present.
+  //   - api mode (`login('api')`): returns tokens in the body; used by C04/C07
+  //     which assert `r.body.data.accessToken` for a Bearer header.
+  const BROWSER_ORIGIN = 'https://test.example.com';
+
   async function verify(payload: {
     message: string;
     signature: `0x${string}`;
     address: string;
     chain?: Chain;
     network?: string;
+    transport?: 'cookie' | 'api';
   }) {
-    return http.post('/auth/verify').send({
+    const transport = payload.transport ?? 'cookie';
+    const req = http.post('/auth/verify').set('X-Auth-Transport', transport);
+    if (transport === 'cookie') {
+      // cookie mode requires a browser Origin in the allowlist (login-CSRF).
+      req.set('Origin', BROWSER_ORIGIN);
+    }
+    return req.send({
       message: payload.message,
       signature: payload.signature,
       address: payload.address,
@@ -429,11 +444,11 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
     });
   }
 
-  async function login() {
+  async function login(transport: 'cookie' | 'api' = 'cookie') {
     const n = await getNonce(alice);
     const message = buildSiweMessage({ ...n, address: alice.address });
     const signature = await signMessage(alice, message);
-    const r = await verify({ message, signature, address: alice.address });
+    const r = await verify({ message, signature, address: alice.address, transport });
     expect(r.status).toBe(200);
     return r; // full supertest response (with headers['set-cookie'])
   }
@@ -506,8 +521,10 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
 
   // ---------------------------- C04 ----------------------------
   it('C04 Bearer takes priority when both Bearer and Cookie are present', async () => {
-    const r = await login();
-    const accessVal = extractCookie(r, ACCESS_COOKIE);
+    // P1-004 v5+ FINAL: api-mode login returns the token in the body (no
+    // cookie set); C04's assertion uses `r.body.data.accessToken` for the
+    // Bearer header and supplies its own (invalid) access cookie manually.
+    const r = await login('api');
     // Use a DIFFERENT (invalid) token in the cookie; Bearer must win → 200.
     const me = await http
       .get('/auth/me')
@@ -521,7 +538,14 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
   it('C05 logout (cookie mode) without X-CSRF-TOKEN → 403 CSRF_TOKEN_INVALID', async () => {
     const r = await login();
     const accessVal = extractCookie(r, ACCESS_COOKIE);
-    const lout = await http.post('/auth/logout').set('Cookie', [`${ACCESS_COOKIE}=${accessVal}`]); // no X-CSRF-TOKEN
+    // P1-004 v5+ FINAL: /logout requires X-Auth-Transport=cookie + browser
+    // Origin (TransportMiddleware). CSRF still enforced; omitting X-CSRF-TOKEN
+    // must yield 403 CSRF_TOKEN_INVALID.
+    const lout = await http
+      .post('/auth/logout')
+      .set('X-Auth-Transport', 'cookie')
+      .set('Origin', BROWSER_ORIGIN)
+      .set('Cookie', [`${ACCESS_COOKIE}=${accessVal}`]); // no X-CSRF-TOKEN
     expect(lout.status).toBe(403);
     expect(lout.body.error.details?.reason).toBe(AuthFailReason.CSRF_TOKEN_INVALID);
     // Audit written.
@@ -538,8 +562,12 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
     const csrfRes = await http.get('/auth/csrf-token');
     const csrfToken = csrfRes.body.data.csrfToken;
     const csrfCookieVal = extractCookie(csrfRes, CSRF_COOKIE);
+    // P1-004 v5+ FINAL: /logout requires X-Auth-Transport=cookie + browser
+    // Origin. CSRF matches → 200 + clears cookies.
     const lout = await http
       .post('/auth/logout')
+      .set('X-Auth-Transport', 'cookie')
+      .set('Origin', BROWSER_ORIGIN)
       .set('Cookie', [`${ACCESS_COOKIE}=${accessVal}`, `${CSRF_COOKIE}=${csrfCookieVal}`])
       .set('X-CSRF-TOKEN', csrfToken);
     expect(lout.status).toBe(200);
@@ -561,19 +589,26 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
 
   // ---------------------------- C07 ----------------------------
   it('C07 Bearer-only logout (no access cookie) → CSRF exempt → 200', async () => {
-    const r = await login();
+    // P1-004 v5+ FINAL: api-mode login returns the token in the body; C07 uses
+    // `r.body.data.accessToken` as the Bearer header. /logout with api transport
+    // + Bearer (no cookies) passes constraint A + CSRF exempt → 200.
+    const r = await login('api');
     // No Cookie header at all → no access cookie → CSRF guard passes through.
     const lout = await http
       .post('/auth/logout')
+      .set('X-Auth-Transport', 'api')
       .set('Authorization', `Bearer ${r.body.data.accessToken}`);
     expect(lout.status).toBe(200);
     expect(lout.body.data.loggedOut).toBe(true);
   });
 
   // ---------------------------- C08 ----------------------------
-  it('C08 anonymous POST with no access cookie → CSRF exempt (reaches JwtAuthGuard → 401)', async () => {
-    const lout = await http.post('/auth/logout'); // no cookie, no bearer
-    // CSRF guard exempts (no access cookie); JwtAuthGuard then rejects → 401.
+  it('C08 anonymous POST with no access cookie → CSRF exempt (reaches LogoutGuard → 401)', async () => {
+    // P1-004 v5+ FINAL: /logout requires X-Auth-Transport. Use api mode with no
+    // credentials — LogoutGuard returns true (does not throw, constraint B);
+    // controller sees both credentials invalid → 401 NOT_AUTHENTICATED (api
+    // mode: no cookies to clear).
+    const lout = await http.post('/auth/logout').set('X-Auth-Transport', 'api'); // no cookie, no bearer
     expect(lout.status).toBe(401);
     expect(lout.body.error.details?.reason).toBe(AuthFailReason.NOT_AUTHENTICATED);
   });
@@ -584,8 +619,12 @@ describe('P1-003 Cookie / CSRF / dual-mode guard', () => {
     const accessVal = extractCookie(r, ACCESS_COOKIE);
     const csrfRes = await http.get('/auth/csrf-token');
     const csrfCookieVal = extractCookie(csrfRes, CSRF_COOKIE);
+    // P1-004 v5+ FINAL: /logout requires X-Auth-Transport=cookie + browser
+    // Origin; CSRF mismatch must still yield 403 CSRF_TOKEN_INVALID.
     const lout = await http
       .post('/auth/logout')
+      .set('X-Auth-Transport', 'cookie')
+      .set('Origin', BROWSER_ORIGIN)
       .set('Cookie', [`${ACCESS_COOKIE}=${accessVal}`, `${CSRF_COOKIE}=${csrfCookieVal}`])
       .set('X-CSRF-TOKEN', 'mismatched-token-value');
     expect(lout.status).toBe(403);

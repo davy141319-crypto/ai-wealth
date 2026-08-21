@@ -4,6 +4,12 @@
   "sourceRoot": "src",
   "compilerOptions": {
     "tsConfigPath": "tsconfig.build.json",
-    "deleteOutDir": true
+    "deleteOutDir": true,
+    "assets": [
+      {
+        "include": "**/*.lua",
+        "watchAssets": true
+      }
+    ]
   }
 }
