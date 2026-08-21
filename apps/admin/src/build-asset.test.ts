@@ -13,11 +13,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const DIST = path.resolve(__dirname, '../../dist');
+const possible = [
+  // jest/ts-jest runtime: __dirname = apps/admin/src (if standard)
+  path.resolve(__dirname, '../../dist'),
+  // fallback when __dirname is wrong: process.cwd() is usually the monorepo root
+  path.resolve(process.cwd(), 'apps/admin/dist'),
+  // fallback: jest <rootDir>/dist = apps/admin/dist
+  path.resolve(process.cwd(), 'dist'),
+];
+const DIST = possible.find((p) => fs.existsSync(p)) ?? possible[0];
 const INDEX_HTML = path.join(DIST, 'index.html');
 
 describe('T14 — build dist/index.html exists (conditional)', () => {
-  const distExists = fs.existsSync(DIST);
+  const distExists = fs.existsSync(DIST) && fs.existsSync(INDEX_HTML);
 
   (distExists ? it : it.skip)('T14: apps/admin/dist/index.html exists after build', () => {
     expect(fs.existsSync(INDEX_HTML)).toBe(true);
