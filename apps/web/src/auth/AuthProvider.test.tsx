@@ -19,11 +19,12 @@
 // 而非注入 fake client。
 // ============================================================================
 
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, act } from '@testing-library/react';
 import { AuthProvider } from './AuthProvider';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { authCoordinator } from './AuthSessionCoordinator';
 import { mockRouter, __resetMockRouter } from '@/__mocks__/next-navigation';
+import type { VerifyResponseUser } from '@/lib/siwe-client';
 
 // ----------------------------------------------------------------------------
 // Mock authApi：用工厂内创建的 jest.fn，通过 __mockGet/__mockPost 暴露给测试。
@@ -226,5 +227,109 @@ describe('P1-005 Fix 1 + Fix 4: AuthProvider 真实渲染状态流', () => {
       const key = String(call[0] ?? '');
       expect(key.toLowerCase()).not.toMatch(/token|access|refresh|jwt|secret/);
     }
+  });
+});
+
+// ============================================================================
+// P1-005 修订（Fix 2）：refreshing 状态真实 React 集成测试
+//
+// 验证 spec v3 规则 10-12 + AC-21：
+//   - authenticated 运行时 401 → refresh 进行中 status=refreshing 且 ProtectedRoute 继续渲染 children（SECRET 可见）
+//   - refresh 成功 → authenticated
+//   - restore 期间 refresh 不出现 refreshing（只有 initializing→authenticated）
+// ============================================================================
+
+describe('P1-005 Fix 2: refreshing 状态真实渲染', () => {
+  /**
+   * 配置 mock authApi，refresh 使用可控延迟的 Promise，使测试能断言 refreshing 中间态。
+   * 返回 resolve 函数：调用以完成 refresh。
+   */
+  type ControllableRefreshResult =
+    { ok: true; user?: VerifyResponseUser } | { ok: false; status: number; reason?: string };
+
+  function setupHttpMocksWithControllableRefresh(opts: { me: MeResult }): {
+    resolveRefresh: (result: ControllableRefreshResult) => void;
+  } {
+    mockGet.mockReset();
+    mockPost.mockReset();
+
+    let resolveRefresh!: (val: ControllableRefreshResult) => void;
+    const refreshPromise = new Promise<ControllableRefreshResult>((r) => {
+      resolveRefresh = r;
+    });
+
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/auth/me') {
+        return opts.me === 'ok'
+          ? Promise.resolve(okEnvelope(makeUser('me-user')))
+          : Promise.reject(errAxios(401));
+      }
+      if (url === '/auth/csrf-token') {
+        return Promise.resolve(okEnvelope({ csrfToken: 'csrf-token' }));
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === '/auth/refresh') {
+        const result = await refreshPromise;
+        if (result.ok) {
+          return okEnvelope({ user: result.user ?? makeUser('refresh-user') });
+        }
+        throw errAxios(result.status, result.reason);
+      }
+      return Promise.reject(new Error(`unexpected POST ${url}`));
+    });
+
+    return { resolveRefresh };
+  }
+
+  it('RT06 authenticated→业务401→refresh 进行中 status=refreshing 且 SECRET 仍可见→成功后 authenticated', async () => {
+    const { resolveRefresh } = setupHttpMocksWithControllableRefresh({ me: 'ok' });
+    renderProtected();
+
+    // 等待 restore 完成 → authenticated，SECRET 出现
+    await screen.findByText('SECRET');
+
+    // 触发运行时 401：直接调 Coordinator（会广播 refreshing，触发 React 状态更新，需 act 包裹）
+    let handlePromise!: Promise<{ retried: boolean }>;
+    await act(async () => {
+      handlePromise = authCoordinator.handleUnauthorized();
+      // 让 microtask 跑到 refresh 调用（Coordinator 已广播 refreshing）
+      await waitFor(() => expect(authCoordinator.getState().status).toBe('refreshing'));
+    });
+
+    // refreshing 期间：ProtectedRoute 必须继续渲染 children（SECRET 仍可见）
+    expect(screen.getByText('SECRET')).not.toBeNull();
+
+    // refresh 成功 → authenticated（resolve 触发状态更新，需 act 包裹）
+    await act(async () => {
+      resolveRefresh({ ok: true, user: makeUser('refreshed-user') });
+      await handlePromise;
+    });
+
+    expect(authCoordinator.getState().status).toBe('authenticated');
+    expect(screen.getByText('SECRET')).not.toBeNull();
+  });
+
+  it('RT07 restore 期间 refresh 不出现 refreshing（只有 initializing→authenticated）', async () => {
+    // restore：/me 401 → refresh（延迟）→ 200。全程只有 initializing→authenticated
+    const { resolveRefresh } = setupHttpMocksWithControllableRefresh({ me: '401' });
+    renderProtected();
+
+    // restore 已开始（/me 401 → refresh pending）。此时状态仍是 initializing
+    await waitFor(() =>
+      expect(mockPost.mock.calls.some((c) => c[0] === '/auth/refresh')).toBe(true),
+    );
+
+    // restore 期间 refresh 进行中：状态必须是 initializing（不是 refreshing）
+    expect(authCoordinator.getState().status).toBe('initializing');
+    // initializing 期间 SECRET 不可见（ProtectedRoute 渲染 loading）
+    expect(screen.queryByText('SECRET')).toBeNull();
+
+    // refresh 完成 → authenticated
+    resolveRefresh({ ok: true, user: makeUser('restored-user') });
+    const secret = await screen.findByText('SECRET');
+    expect(secret).not.toBeNull();
+    expect(authCoordinator.getState().status).toBe('authenticated');
   });
 });

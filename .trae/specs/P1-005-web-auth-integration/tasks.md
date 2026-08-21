@@ -163,6 +163,32 @@
 - /auth/* 请求（via authApi）401 不触发拦截器递归
 - authApi 无 401 拦截器（验证不装）
 
+---
+
+## 验收修复任务（v3.1，基线 ab7faf9）
+
+### TF1 — 修复首次 wallet connect 竞态
+
+- [x] 禁止 `connectAsync` 后 `setTimeout` 读 `useAccount` ref
+- [x] 未连接时：`const result = await connectAsync(...)`，从 `result.accounts[0]` + `result.chainId` 构造返回值
+- [x] `accounts` 为空 → 明确报错
+- [x] 已连接时才用当前 `address + chainId`；`chainId` undefined → 报错（不回退 1）
+- [x] 测试 WC01-WC08（8 tests）：初始未连接返回 B+11155111；不误用 mainnet chainId=1；空 accounts 报错；已连接用当前值；chainId undefined 报错
+
+### TF2 — 真正实现 refreshing 状态
+
+- [x] `SessionState` 新增 `refreshing` 变体（保留 user）
+- [x] `handleUnauthorized` 已 authenticated 时广播 `refreshing` → refresh 成功 `authenticated` / 失败 `unauthenticated`
+- [x] `restore` / `handleUnauthorizedRestore` 全程 `initializing`，绝不广播 `refreshing`（AC-21）
+- [x] ProtectedRoute：refreshing → 渲染 children
+- [x] 测试 U08-U11（Coordinator 单元）：refresh 进行中 refreshing 保留 user；失败 unauthenticated；restore 不出现 refreshing；并发 single-flight refreshing 只广播一次
+- [x] 测试 RT06-RT07（真实 React 渲染）：401→refreshing 期间 SECRET 可见→成功 authenticated；restore refresh 只有 initializing→authenticated
+
+### 测试数汇总
+
+- apps/web：97 tests（原 83 + 14 新增）
+- CI：10/10 全绿
+
 ## T17 — AuthProvider 状态机测试
 
 - mount → initializing → authenticated（/auth/me 200）

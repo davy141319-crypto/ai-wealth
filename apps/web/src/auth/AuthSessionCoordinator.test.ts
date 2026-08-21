@@ -420,6 +420,138 @@ describe('P1-005 AuthSessionCoordinator.handleUnauthorized()（运行时 401）'
     expect(calls.refresh).toBe(1); // 这一次 handleUnauthorized 触发的
     expect(calls.me).toBe(1); // 409 后的 /me
   });
+
+  // ==========================================================================
+  // Fix 2：refreshing 状态真实广播（spec v3 规则 10-12）
+  // ==========================================================================
+
+  it('U08 authenticated → 401 → refresh 进行中 status=refreshing（保留 user）→ 成功后 authenticated', async () => {
+    const co = newCoordinator();
+    const initialUser = makeUser('u-init');
+    const refreshedUser = makeUser('u-refresh');
+    let resolveRefresh!: (v: { status: number; user?: VerifyResponseUser }) => void;
+    const refreshPromise = new Promise<{ status: number; user?: VerifyResponseUser }>((r) => {
+      resolveRefresh = r;
+    });
+    const { client } = makeFakeClient({
+      me: { status: 200, user: initialUser },
+      refresh: () => refreshPromise,
+    });
+    co.registerClient(client);
+    await co.restore();
+    expect(co.getState().status).toBe('authenticated');
+
+    // 触发 handleUnauthorized 但不 await（让 refresh 停在 pending）
+    const handlePromise = co.handleUnauthorized();
+    // 让 microtask 跑到 refresh 调用
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // refresh 进行中：状态必须是 refreshing，且保留原 user
+    expect(co.getState().status).toBe('refreshing');
+    expect(co.getState().user?.id).toBe('u-init');
+
+    // refresh 完成 → authenticated
+    resolveRefresh({ status: 200, user: refreshedUser });
+    const result = await handlePromise;
+
+    expect(result.retried).toBe(true);
+    expect(co.getState().status).toBe('authenticated');
+    expect(co.getState().user?.id).toBe('u-refresh');
+  });
+
+  it('U09 authenticated → 401 → refresh 失败 → unauthenticated（先经过 refreshing）', async () => {
+    const co = newCoordinator();
+    let resolveRefresh!: (v: { status: number; user?: VerifyResponseUser }) => void;
+    const refreshPromise = new Promise<{ status: number; user?: VerifyResponseUser }>((r) => {
+      resolveRefresh = r;
+    });
+    const { client } = makeFakeClient({
+      me: { status: 200, user: makeUser('u-init') },
+      refresh: () => refreshPromise,
+    });
+    co.registerClient(client);
+    await co.restore();
+
+    const handlePromise = co.handleUnauthorized();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // refresh 进行中：refreshing
+    expect(co.getState().status).toBe('refreshing');
+
+    // refresh 失败（401）→ unauthenticated
+    resolveRefresh({ status: 401 });
+    const result = await handlePromise;
+
+    expect(result.retried).toBe(false);
+    expect(co.getState().status).toBe('unauthenticated');
+  });
+
+  it('U10 restore 期间 refresh 不广播 refreshing（AC-21）', async () => {
+    // restore 时 /me 401 → 触发 handleUnauthorizedRestore（内部 refresh），
+    // 全程状态只有 initializing → authenticated，绝不出现 refreshing
+    const co = newCoordinator();
+    let resolveRefresh!: (v: { status: number; user?: VerifyResponseUser }) => void;
+    const refreshPromise = new Promise<{ status: number; user?: VerifyResponseUser }>((r) => {
+      resolveRefresh = r;
+    });
+    const { client } = makeFakeClient({
+      me: { status: 401 },
+      refresh: () => refreshPromise,
+    });
+    co.registerClient(client);
+    const states = collectStates(co);
+
+    const restorePromise = co.restore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // restore 期间 refresh 进行中，状态仍是 initializing（不是 refreshing）
+    expect(co.getState().status).toBe('initializing');
+
+    resolveRefresh({ status: 200, user: makeUser('u-restore') });
+    await restorePromise;
+
+    // 状态序列只有 initializing 和 authenticated，绝不出现 refreshing
+    expect(states.map((s) => s.status)).toEqual(['initializing', 'authenticated']);
+    expect(states.some((s) => s.status === 'refreshing')).toBe(false);
+  });
+
+  it('U11 并发 401：single-flight 复用，refreshing 只广播一次', async () => {
+    const co = newCoordinator();
+    let resolveRefresh!: (v: { status: number; user?: VerifyResponseUser }) => void;
+    const refreshPromise = new Promise<{ status: number; user?: VerifyResponseUser }>((r) => {
+      resolveRefresh = r;
+    });
+    const { client, calls } = makeFakeClient({
+      me: { status: 200, user: makeUser('u-init') },
+      refresh: () => refreshPromise,
+    });
+    co.registerClient(client);
+    await co.restore();
+    const states = collectStates(co);
+
+    // 并发 2 个 handleUnauthorized
+    const p1 = co.handleUnauthorized();
+    const p2 = co.handleUnauthorized();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // refresh 进行中：refreshing
+    expect(co.getState().status).toBe('refreshing');
+
+    resolveRefresh({ status: 200, user: makeUser('u-refresh') });
+    await Promise.all([p1, p2]);
+
+    // 只 refresh 一次（single-flight）
+    expect(calls.refresh).toBe(1);
+    // 最终 authenticated
+    expect(co.getState().status).toBe('authenticated');
+    // refreshing 状态在序列中只出现一次（第一个 401 广播，第二个复用 inflight 不再广播）
+    const refreshingCount = states.filter((s) => s.status === 'refreshing').length;
+    expect(refreshingCount).toBe(1);
+  });
 });
 
 // ============================================================================

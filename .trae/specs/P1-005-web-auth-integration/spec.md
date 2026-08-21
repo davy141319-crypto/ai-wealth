@@ -177,6 +177,34 @@ ProtectedRoute 行为（v3 修订）：
 - 真实认证由 AuthProvider /auth/me 完成
 - cookie 名称根据 NODE_ENV 匹配 dev/prod 命名契约
 
+---
+
+## 修订记录（验收修复）
+
+### v3.1（验收 FAIL 修复 — connect 竞态 + refreshing 真实广播）
+
+基线 HEAD：ab7faf9（v3 实现 + Fix 1/2/3/4 已合入）。
+
+**修复 1：首次 wallet connect 竞态**
+
+- 旧实现：`connectAsync` 后 `setTimeout(0)` 读 `useAccount` ref 获取连接结果。wagmi 状态更新有微任务延迟，ref 闭包是渲染快照，会读到旧值（undefined 或错误的 chainId=1）。
+- 新实现：未连接时直接用 `connectAsync` 返回值（`result.accounts[0]` + `result.chainId`），不依赖 useAccount ref。已连接时才用当前 `useAccount`。`accounts` 为空报错；`chainId` undefined 报错（不回退 1）。
+- 新增测试 WC01-WC08（8 tests）。
+
+**修复 2：refreshing 状态真实广播**
+
+- 旧实现：Coordinator 只广播 3 态（initializing/authenticated/unauthenticated），refreshing 是 AuthProvider 派生的瞬时态但实际从未触发，spec 规则 10-12 未真正实现。
+- 新实现：
+  - `SessionState` 新增 `refreshing` 变体（保留 user，使 ProtectedRoute 继续渲染 children）。
+  - `handleUnauthorized` 在已 authenticated 时，开始 refresh 前广播 `refreshing`（保留 prevState.user）。
+  - `restore` / `handleUnauthorizedRestore` 全程保持 initializing，**绝不**广播 refreshing（AC-21）。
+  - ProtectedRoute：refreshing → 渲染 children（已有，确认正确）。
+- 新增测试 U08-U11（Coordinator 单元）+ RT06-RT07（真实 React 渲染）。
+
+**测试数**：apps/web 97 tests（原 83 + WC01-08 + U08-U11 + RT06-RT07 = 14 新增）。
+**CI**：10/10 全绿（lint/typecheck/test/build/secret-scan/docker/CI gate/CodeQL）。
+**PR #6**：open，未 Merge。
+
 ## Acceptance Criteria
 
 | AC #  | 验收项                                                                                                           | 验证方式             |

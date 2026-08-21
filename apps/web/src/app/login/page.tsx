@@ -10,12 +10,15 @@
 // 否则 build 会报 "useSearchParams() should be wrapped in a suspense boundary"。
 // 因此本文件拆为 LoginPage（默认导出，提供 Suspense 外壳）+ LoginContent（实际表单）。
 //
-// P1-005 修订（Fix 1 + Fix 3）：
+// P1-005 修订（Fix 1 + Fix 3 + wallet connect 竞态修复）：
 //   - 登录不再调用 registerClient；Coordinator 单例已持默认 client，login(connector) 注入 connector。
 //   - ?next= 经 safeRedirectTarget 校验，仅放行本站安全相对路径（Fix 3）。
+//   - 首次 connect 竞态修复：禁止 connectAsync 后 setTimeout 读 useAccount ref。
+//     未连接时直接用 connectAsync 返回值（result.accounts[0] + result.chainId）构造 connector；
+//     已连接时才用当前 useAccount 的 address+chainId。chainId 不得 undefined 回退 1。
 // ============================================================================
 
-import { Suspense, useState, useEffect, useRef } from 'react';
+import { Suspense, useState } from 'react';
 import { Alert, Button, Card, Space, Spin, Typography } from 'antd';
 import { WalletOutlined } from '@ant-design/icons';
 import { useAccount, useSignMessage, useConnect } from 'wagmi';
@@ -47,33 +50,45 @@ function LoginContent() {
   const { connectAsync, connectors, isPending: isConnecting } = useConnect();
   const { signMessageAsync } = useSignMessage();
   const [error, setError] = useState<string | null>(null);
-  // 捕获 connect 后的最新 address/chainId（wagmi 状态在 connectAsync resolve 后更新，
-  // 但闭包内的 address 变量是渲染时的快照，因此用 ref 跟踪）
-  const latestAddr = useRef<Address | null>(null);
-  const latestChain = useRef<number | undefined>(undefined);
-  useEffect(() => {
-    latestAddr.current = address ?? null;
-  }, [address]);
-  useEffect(() => {
-    latestChain.current = chainId;
-  }, [chainId]);
 
   // Fix 3：?next= 安全校验，非法值 fallback /dashboard
   const next = safeRedirectTarget(params.get('next'));
 
-  /** 构造 LoginConnector，桥接 wagmi → SiweWalletClient。 */
+  /**
+   * 构造 LoginConnector，桥接 wagmi → SiweWalletClient。
+   *
+   * 首次 connect 竞态修复（验收要求）：
+   *   - 未连接时：必须 `await connectAsync(...)`，从其返回值 `result.accounts[0]` + `result.chainId`
+   *     读取本次连接结果。禁止 connectAsync 后 setTimeout 读 useAccount ref——wagmi 的 useAccount
+   *     状态更新有微任务延迟，ref 闭包是渲染快照，会读到旧值（undefined 或错误的 chainId=1）。
+   *   - 已连接时：直接使用当前 useAccount 的 address + chainId（连接已稳定）。
+   *   - accounts 为空必须明确报错；chainId 不得 undefined 回退 1（否则会误用 mainnet 触发错误的 SIWE 域）。
+   */
   function buildConnector(): LoginConnector {
     return {
       connect: async () => {
-        if (!isConnected && connectors.length > 0) {
-          await connectAsync({ connector: connectors[0] });
+        if (isConnected) {
+          // 已连接：用当前 useAccount 的 address + chainId（连接已稳定，不存在竞态）
+          if (!address) throw new Error('Connected wallet address unavailable');
+          if (chainId === undefined || chainId === null) {
+            throw new Error('Connected wallet chainId unavailable');
+          }
+          return { address, chainId };
         }
-        // connect 后 wagmi 状态更新有微任务延迟，等一拍再读 ref
-        await new Promise((r) => setTimeout(r, 0));
-        const addr = latestAddr.current;
-        if (!addr) throw new Error('Wallet address unavailable after connect');
-        const chain = latestChain.current ?? 1;
-        return { address: addr, chainId: chain };
+        // 未连接：connectAsync 返回本次连接结果，直接读取，不依赖 useAccount ref
+        if (connectors.length === 0) {
+          throw new Error('No wallet connector available');
+        }
+        const result = await connectAsync({ connector: connectors[0] });
+        const connectedAddress = result.accounts[0];
+        if (!connectedAddress) {
+          throw new Error('connectAsync returned empty accounts');
+        }
+        const connectedChainId = result.chainId;
+        if (connectedChainId === undefined || connectedChainId === null) {
+          throw new Error('connectAsync returned undefined chainId');
+        }
+        return { address: connectedAddress as Address, chainId: connectedChainId };
       },
       signMessage: (message: string) => signMessageAsync({ message }) as Promise<`0x${string}`>,
       resolveChain: (cid: number) => CHAIN_TO_BACKEND[cid] ?? null,

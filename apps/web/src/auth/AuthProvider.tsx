@@ -9,9 +9,9 @@
 // 关键规则（spec v3 + 修订）：
 //   - mount 时调 Coordinator.restore()（仅一次）。单例已注册默认 SiweWalletClient（无 connector），
 //     因此 restore 立即可调用 /auth/me——不再依赖用户先连接钱包（Fix 1）。
-//   - restore 全程状态保持 initializing，即使内部执行 refresh 也不广播 refreshing
-//   - 'refreshing' 仅用于已 authenticated 后运行时请求 401（由 Coordinator 在
-//     handleUnauthorized 中触发，Coordinator 广播 authenticated 后即恢复）
+//   - restore 全程状态保持 initializing，即使内部执行 refresh 也不广播 refreshing（AC-21）
+//   - 'refreshing' 由 Coordinator 在 handleUnauthorized 开始 refresh 时真实广播（spec v3 规则 10），
+//     保留 user 使 ProtectedRoute 继续渲染 children（规则 11）。AuthProvider 直接透传该状态。
 //   - login(connector) 前设置 'authenticating'；connector 仅签名时需要，由 login() 注入
 //   - logout() 不改 UI 状态（Coordinator 广播 unauthenticated）
 //
@@ -38,22 +38,22 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 /**
  * 从 Coordinator 的 SessionState 派生 UI AuthStatus。
  *
- * Coordinator 只广播 3 态（initializing/authenticated/unauthenticated）+ user。
- * 'authenticating' / 'refreshing' 是 UI 层的瞬时态，由 AuthProvider 在
- * login()/logout() 调用前后设置。
+ * Coordinator 广播 4 态（initializing/authenticated/refreshing/unauthenticated）+ user。
+ * 'authenticating' 是 UI 层的瞬时态，由 AuthProvider 在 login() 调用前后设置（uiOverride）。
  *
  * spec v3 AC-21：初始化期 restore 即使执行 refresh，状态始终 initializing。
- * 这里我们直接用 Coordinator 的 status，因此初始化期 refresh 不会产生 refreshing。
+ * Coordinator 的 handleUnauthorizedRestore 全程不广播 refreshing，因此初始化期不会产生 refreshing。
+ * 运行时 401 时 Coordinator 真实广播 refreshing（保留 user），这里直接透传。
  */
 function deriveStatus(session: SessionState, uiOverride: AuthStatus | null): AuthStatus {
   if (uiOverride) return uiOverride;
-  // Coordinator 没有 refreshing 态；运行时 401 的 refreshing 是短暂的，
-  // 由 api.ts 拦截器 await handleUnauthorized 期间阻塞请求，UI 保持当前视图。
   switch (session.status) {
     case 'initializing':
       return 'initializing';
     case 'authenticated':
       return 'authenticated';
+    case 'refreshing':
+      return 'refreshing';
     case 'unauthenticated':
       return 'unauthenticated';
   }

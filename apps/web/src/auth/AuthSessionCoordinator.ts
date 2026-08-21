@@ -4,6 +4,7 @@
 // 单例（框架无关，不依赖 React）。职责：
 //   1. restore()：应用启动调 /auth/me 恢复会话（全程 initializing，不广播 refreshing）
 //   2. handleUnauthorized(originalRequest)：运行时 401 → single-flight refresh + 重试
+//      - 开始 refresh 时广播 'refreshing'（保留上一个 authenticated 的 user，供 ProtectedRoute 继续渲染 children）
 //      - refresh 200 → authenticated + 重试原请求
 //      - refresh 409 → 禁止循环 refresh；调 /auth/me：200 则 authenticated + 重试；
 //        401/403 则 unauthenticated → /login
@@ -11,30 +12,38 @@
 //   3. handleUnauthorizedRestore()：初始化期 401 → 单次 refresh（不广播 refreshing）
 //   4. handleForbidden()：403 REUSED/REVOKED → 清状态 → /login
 //
-// P1-005 修订（session restore）：
+// P1-005 修订（session restore + refreshing 真实广播）：
 //   - 模块导出的单例 authCoordinator 在创建后立即注册一个默认 SiweWalletClient（无 connector）。
 //     这样应用启动（AuthProvider mount）即可调用 me/refresh/logout 恢复会话，
 //     不再依赖用户先连接钱包。钱包 connector 仅 login() 签名时需要，由 login(connector) 注入。
 //   - registerClient 仍保留：测试可注入 fake client；生产也可覆盖（一般不需要）。
+//   - refreshing 状态由 Coordinator 真实广播（spec v3 状态机规则 10-12）：
+//     authenticated 运行时 401 → refreshing（保留 user）→ authenticated/unauthenticated。
+//     初始化 restore 期间永远不广播 refreshing（spec v3 AC-21 / 规则 6）。
 //
 // 依赖（强制约束 B）：
 //   - 仅使用 SiweWalletClient（其内部用 authApi，无 401 拦截器）
 //   - 禁止使用业务 api.ts（会形成循环依赖）
 //
 // 状态机（spec v3）：
-//   sessionState ∈ 'initializing' | 'authenticated' | 'unauthenticated'
-//   'authenticating' / 'refreshing' 是 AuthProvider 派生的 UI 状态，Coordinator 只
-//   广播上述 3 态 + optional user。AuthProvider 根据是否在 login/refresh 过程中派生
-//   authenticating/refreshing。
+//   sessionState ∈ 'initializing' | 'authenticated' | 'refreshing' | 'unauthenticated'
+//   'authenticating' 是 AuthProvider 派生的 UI 状态（login 进行中）。
+//   'refreshing' 由 Coordinator 在 handleUnauthorized 开始 refresh 时真实广播。
 // ============================================================================
 
 import type { AxiosRequestConfig } from 'axios';
 import { SiweWalletClient, type VerifyResponseUser, type LoginConnector } from '@/lib/siwe-client';
 
-/** Coordinator 广播的会话状态。AuthProvider 订阅并派生 UI 状态。 */
+/**
+ * Coordinator 广播的会话状态。AuthProvider 订阅并派生 UI 状态。
+ *
+ * 'refreshing' 保留上一个 authenticated 的 user，使 ProtectedRoute 能继续渲染 children
+ * （spec v3 规则 11：refreshing → 渲染 children，保持当前视图）。
+ */
 export type SessionState =
   | { status: 'initializing'; user: null }
   | { status: 'authenticated'; user: VerifyResponseUser }
+  | { status: 'refreshing'; user: VerifyResponseUser }
   | { status: 'unauthenticated'; user: null };
 
 /** 订阅回调。 */
@@ -162,17 +171,28 @@ export class AuthSessionCoordinator {
 
   /**
    * 业务请求（via api.ts）返回 401 时调用。
-   * - 广播 refreshing（已 authenticated 后的运行时刷新）
+   * - 若当前状态为 authenticated：广播 refreshing（保留 user，ProtectedRoute 继续渲染 children）
+   *   然后开始 single-flight refresh。spec v3 规则 10-12。
    * - single-flight refresh
    * - 200 → authenticated + 重试原请求
    * - 409 → /auth/me 判定 + 重试原请求（最多1次）
    * - 401/403 → unauthenticated → /login
    *
-   * 返回值：如果 refresh 后重试原请求成功，返回 { retried: true, response }；
+   * ⚠️ refreshing 只在已 authenticated 时广播；初始化 restore 期间走 handleUnauthorizedRestore，
+   *    全程保持 initializing（spec v3 AC-21 / 规则 6），永远不出现 refreshing。
+   *
+   * 返回值：如果 refresh 后重试原请求成功，返回 { retried: true }；
    * 如果会话失效无法重试，返回 { retried: false }。
    */
   async handleUnauthorized(originalRequest?: AxiosRequestConfig): Promise<{ retried: boolean }> {
     if (!this.client) return { retried: false };
+
+    // 仅当当前是 authenticated 时才广播 refreshing（spec v3 规则 10）。
+    // restore 期间不会走到这里（restore 走 handleUnauthorizedRestore）；防御性检查避免误广播。
+    const prevState = this.state;
+    if (prevState.status === 'authenticated' && prevState.user) {
+      this.notify({ status: 'refreshing', user: prevState.user });
+    }
 
     // single-flight：并发 401 复用同一个 refresh Promise
     const outcome = await this.runRefreshOnce();
