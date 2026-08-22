@@ -338,6 +338,12 @@ describe('TwoPhaseOrchestrator unit (T14/T15/T17/T33 ACs)', () => {
       fn: (c: unknown) => Promise<unknown>,
       opts?: unknown,
     ) => Promise<unknown>;
+    // DI: use a fully mocked singleton client so Phase A role checks and
+    // error-path markFailedOutsideTx never touch the real prisma singleton
+    // (CI has no DATABASE_URL → any direct singleton PrismaClient raw query
+    // would emit 'Cannot log after tests are done' env-error via prisma
+    // logger, causing jest to report exit 1 even though assertions pass).
+    const { client } = makeMockTxClient();
     let counter = 0;
     (
       prisma as unknown as {
@@ -354,7 +360,20 @@ describe('TwoPhaseOrchestrator unit (T14/T15/T17/T33 ACs)', () => {
         return Promise.reject(err);
       },
     );
-    const orch = new TwoPhaseOrchestrator();
+    const orch = new TwoPhaseOrchestrator(
+      new LedgerEngine(),
+      new FeatureFlagService(),
+      new AuditSensitiveMutationService(),
+      {
+        prismaClient: prisma,
+        reposFactory: (tx) => {
+          const base: Record<string, unknown> = (tx ?? client) as Record<string, unknown>;
+          const out = Object.create(base) as Repositories;
+          Object.defineProperty(out, 'tx', { value: tx, writable: false, configurable: true });
+          return out;
+        },
+      },
+    );
     try {
       const err = await orch
         .run({
@@ -362,7 +381,7 @@ describe('TwoPhaseOrchestrator unit (T14/T15/T17/T33 ACs)', () => {
           validate: (v) => ({ ok: true, value: v }),
           scope: 'sr',
           idempotencyKey: 'sr-1',
-          actorUserId: null,
+          actorUserId: 'user-uuid', // valid role so Phase A1 role check passes
           requiredRole: UserRole.USER,
           engine: new (class extends SettlementEngineStub {
             override async preflight() {

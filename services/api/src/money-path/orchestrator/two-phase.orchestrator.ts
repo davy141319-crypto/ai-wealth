@@ -472,7 +472,13 @@ export class TwoPhaseOrchestrator {
         requestHash,
         String(code),
         txErr instanceof Error ? { message: txErr.message } : undefined,
-      );
+        // .catch so Jest never sees dangling unhandled rejections when a
+        // repos factory is miswired (prevents "Cannot log after tests are
+        // done" from Prisma's async error logger). markFailedOutsideTx
+        // already wraps the body in try/catch, but adding a top-level
+        // safety ensures rejections from any future caller change still
+        // don't escape the orchestrator process boundary.
+      ).catch(() => undefined);
       throw txErr;
     }
   }

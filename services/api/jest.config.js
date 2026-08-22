@@ -15,6 +15,7 @@ module.exports = {
   // maxWorkers = cpus - 1 = 1 worker). The small local-performance cost is
   // worth eliminating a full-class of flaky shared-DB failures.
   maxWorkers: 1,
+  setupFiles: ['<rootDir>/jest.preset-env.js'],
   roots: ['<rootDir>/src', '<rootDir>/test'],
   testMatch: ['**/*.test.ts', '**/*.spec.ts'],
   moduleNameMapper: {

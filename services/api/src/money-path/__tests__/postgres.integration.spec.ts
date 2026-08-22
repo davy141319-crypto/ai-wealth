@@ -26,7 +26,17 @@ import { SettlementEngineStub, RiskEngineStub } from '../domain';
 import type { CommitPlan } from '../domain';
 import { AuditSensitiveMutationService } from '../audit/audit-sensitive-mutation.service';
 
-const requireLiveDB = (): boolean => !!process.env['DATABASE_URL'];
+const requireLiveDB = (): boolean =>
+  // The jest.preset-env.js worker bootstrap injects a syntactically-valid
+  // placeholder DATABASE_URL when no real DB is configured, purely so
+  // PrismaClient's logger never raises the "Environment variable not
+  // found" diagnostic (that async log fires after all tests finish and
+  // forces jest exit 1 via "Cannot log after tests are done"). Together
+  // with the placeholder the preset also sets SKIP_P1008_INTEGRATION=1 so
+  // this gate here flips back to "not a live-DB environment" — we must
+  // never run the live beforeAll/afterAll cleanup or the real integration
+  // tests against the placeholder URL.
+  !!process.env['DATABASE_URL'] && process.env['SKIP_P1008_INTEGRATION'] !== '1';
 
 function fixtureTxn(
   t: Partial<WriteJournalInput> & Pick<WriteJournalInput, 'txnIdempotencyKey' | 'scope'>,
@@ -136,16 +146,23 @@ const SKIP = !requireLiveDB() || process.env['SKIP_P1008_INTEGRATION'] === '1';
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
-  const userBeforeAllPromise: Promise<User | null> = (async () => {
-    try {
-      // Ensure test-admin user exists.
-      const emailLike = { id: undefined as unknown as string } as unknown as { id: string };
-      void emailLike;
-      return await createAdminUser();
-    } catch {
-      return null;
-    }
-  })();
+  // Do NOT eagerly construct the admin-user promise with an IIFE at
+  // describe-body-evaluation time: jest evaluates describe.skip bodies so
+  // any raw Prisma call in an IIFE still fires (e.g. connecting to the
+  // jest.preset-env.js placeholder DSN), producing an async prisma log
+  // event after tests finish and forcing jest exit 1. Instead, materialise
+  // the user from inside a beforeAll, which jest correctly skips when the
+  // enclosing describe is skipped via describe.skip.
+  let userBeforeAllPromise: Promise<User | null>;
+  beforeAll(() => {
+    userBeforeAllPromise = (async () => {
+      try {
+        return await createAdminUser();
+      } catch {
+        return null;
+      }
+    })();
+  });
 
   async function txn<T>(fn: (tx: Repositories) => Promise<T>): Promise<T> {
     // Wrap in a Serializable transaction that ALWAYS rolls back after the

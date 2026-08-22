@@ -93,7 +93,16 @@ describe('P1-008 migration boundary (T21 / T25 boundary audit)', () => {
   });
 
   describe('Live Postgres append-only (T21 UPDATE/DELETE failures with rollback confirmation)', () => {
-    const skip = !process.env['DATABASE_URL'];
+    // Skip when no live Postgres is configured. DATABASE_URL alone is no
+    // longer enough because jest.preset-env.js injects a placeholder DSN
+    // when the env var is absent — that prevents PrismaClient's logger
+    // from spawning 'Environment variable not found: DATABASE_URL'
+    // async errors after tests finish, but means we need a second gate so
+    // the placeholder never accidentally enables a real-DB describe block.
+    const skip =
+      !process.env['DATABASE_URL'] ||
+      process.env['SKIP_P1008_INTEGRATION'] === '1' ||
+      process.env['MONEY_PATH_SKIP_LIVE_APPENDONLY'] === '1';
     const maybed = skip ? describe.skip : describe;
     maybed('append-only triggers on live DB', () => {
       // Clean up committed rows from this describe block after all tests run.
@@ -103,7 +112,7 @@ describe('P1-008 migration boundary (T21 / T25 boundary audit)', () => {
       // (postgres.integration.spec.ts) don't see leftover committed rows
       // which would cause Serializable predicate-lock deadlocks.
       afterAll(async () => {
-        if (!process.env['DATABASE_URL']) return;
+        if (skip) return;
         try {
           await prisma.$executeRawUnsafe(
             `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
