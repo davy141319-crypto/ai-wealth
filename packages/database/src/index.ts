@@ -18,7 +18,26 @@ export { ChainUtils, UNSUPPORTED_CHAIN_ID, EV_CHAINS_SUPPORTED } from './chain-u
 //
 // Enums are runtime VALUES — re-exported without `type` so services can use
 // them as both types AND values (e.g. `UserStatus.ACTIVE`, `UserRole.ADMIN`
-// in P1-006 RolesGuard). Model interfaces + the Prisma namespace remain
-// type-only (they have no runtime enum value).
-export type { Wallet, User, AuthNonce, WalletIdentity, AuditLog, Prisma } from '@prisma/client';
-export { Chain, WalletStatus, UserStatus, UserRole, IdentityType } from '@prisma/client';
+// in P1-006 RolesGuard). Model interfaces remain type-only.
+// NOTE: `Prisma` is ALSO re-exported as a VALUE (not only type) because
+// money-path engine code uses `Prisma.Decimal`, `Prisma.JsonNull` at runtime.
+export type {
+  Wallet,
+  User,
+  AuthNonce,
+  WalletIdentity,
+  AuditLog,
+  LedgerTransaction,
+  LedgerPosting,
+} from '@prisma/client';
+export {
+  Chain,
+  WalletStatus,
+  UserStatus,
+  UserRole,
+  IdentityType,
+  // P1-008 runtime enums
+  LedgerTxnType,
+  LedgerAmountSign,
+} from '@prisma/client';
+export { Prisma } from '@prisma/client';

@@ -5,9 +5,9 @@
 //
 // Scope: identity / auth-nonce / audit / idempotency / system-config ONLY.
 // FORBIDDEN in this schema (hard constraint): real USDT balance, deposit,
-// withdrawal, wealth product, income, points, tasks, invitation, team, V1-V5,
-// gambling, sports, e-sports, lottery, live entertainment, or ANY real fund
-// field. Those arrive in later phases and must be testnet-verified first.
+// FORBIDDEN (hard boundary): withdrawal, wealth product, income, points, tasks, invitation, team, V1-V5,
+// FORBIDDEN (hard boundary): gambling, sports, e-sports, lottery, live entertainment, or ANY real fund
+// FORBIDDEN (hard boundary): field. Those arrive in later phases and must be testnet-verified first.
 //
 // CONVENTION — unified time handling (applies to EVERY model):
 //   createdAt DateTime @default(now())   @map("created_at")
@@ -96,6 +96,35 @@ enum SystemConfigValueType {
   JSON
 }
 
+// ============================================================================
+// P1-008 Money-Path Foundation (Option A APPROVED).
+//
+// Hard boundary — this section is pure accounting infrastructure ONLY.
+// FORBIDDEN to add anywhere in this schema (P1-008): real balance,
+// FORBIDDEN (hard boundary P1-008): available_balance, frozen_balance, USDT_balance, deposit, withdrawal,
+// FORBIDDEN (hard boundary P1-008): tx_hash, chain transaction, network, wallet custody, hot wallet,
+// FORBIDDEN (hard boundary P1-008): private key, treasury balance. Those land in later phase tasks only.
+// ============================================================================
+
+/// Class of a ledger journal. Values describe the accounting event.
+enum LedgerTxnType {
+  SETTLEMENT
+  COMMISSION
+  TREASURY_MOVE
+  TRANSFER
+  REVERSAL
+  MANUAL_ADMIN
+  OPENING_BALANCE
+}
+
+/// Sign of a ledger posting. Amounts are always positive atomic integer
+/// units (stored in NUMERIC(38, 0)); the sign expresses DEBIT/CREDIT side
+/// so Σ DEBIT === Σ CREDIT holds exactly per LedgerTransaction.
+enum LedgerAmountSign {
+  DEBIT
+  CREDIT
+}
+
 // ----------------------------------------------------------------------------
 // 1. User — the human actor. No credentials stored here (auth is wallet-based).
 // ----------------------------------------------------------------------------
@@ -118,7 +147,7 @@ model User {
 }
 
 // ----------------------------------------------------------------------------
-// 2. Wallet — a blockchain address bound to a user. Identity only (no balance).
+// 2. Wallet — a blockchain address bound to a user. Identity only (FORBIDDEN hard boundary: no balance field ever here).
 //    UNIQUE(address, chain, network): the same address on a different network
 //    is a distinct wallet row (e.g. USDT-ERC20 vs USDT-TRC20 live on different
 //    networks even when chained under ETH/TRON).
@@ -275,4 +304,63 @@ model SystemMeta {
   updatedAt DateTime @updatedAt      @map("updated_at")
 
   @@map("system_meta")
+}
+
+// ----------------------------------------------------------------------------
+// P1-008 — 8. LedgerTransaction (journal header)
+// Append-only immutable. No updatedAt column.
+// ----------------------------------------------------------------------------
+model LedgerTransaction {
+  id                String              @id @default(uuid()) @db.Uuid
+  scope             String              @db.VarChar(64)
+  txnIdempotencyKey String              @map("txn_idempotency_key") @db.VarChar(128)
+  txnType           LedgerTxnType       @map("txn_type")
+  currency          String              @db.VarChar(16)
+  unit              String              @db.VarChar(16)
+  decimals          Int                 @default(6)
+  source            String              @db.VarChar(32)
+  reference         String?             @db.VarChar(256)
+  // reversesTxnId — a REVERSAL txn points at the original txn it negates.
+  // UNIQUE guarantees the SAME original transaction CANNOT be reversed twice;
+  // undoing a reversal is done by reversing the REVERSAL txn instead.
+  reversesTxnId     String?             @map("reverses_txn_id") @db.Uuid
+  reversesTxn       LedgerTransaction?  @relation("TxnReversal", fields: [reversesTxnId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedByTxns    LedgerTransaction[] @relation("TxnReversal")
+  actorUserId       String?             @map("actor_user_id") @db.Uuid // nullable, no FK per ChatGPT ruling (ledger history survives user deletion with ZERO UPDATE).
+  requestId         String?             @map("request_id") @db.VarChar(64)
+  metadata          Json?
+  createdAt         DateTime            @default(now()) @map("created_at")
+  postings          LedgerPosting[]
+
+  @@unique([scope, txnIdempotencyKey], map: "ledger_txn_scope_idempotency_uq")
+  @@unique([reversesTxnId], map: "ledger_txn_reverses_unique_uq")
+  @@index([txnType, createdAt], map: "ledger_txn_type_created_idx")
+  @@index([source], map: "ledger_txn_source_idx")
+  @@index([actorUserId, createdAt], map: "ledger_txn_actor_idx")
+  @@map("ledger_transactions")
+}
+
+// ----------------------------------------------------------------------------
+// P1-008 — 9. LedgerPosting (journal leg). Immutable. No updatedAt column.
+// ----------------------------------------------------------------------------
+model LedgerPosting {
+  id                String          @id @default(uuid()) @db.Uuid
+  ledgerTxnId       String          @map("ledger_txn_id") @db.Uuid
+  ledgerTxn         LedgerTransaction @relation(fields: [ledgerTxnId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  accountType       String          @map("account_type") @db.VarChar(32)
+  accountId         String          @map("account_id")   @db.VarChar(128)
+  sign              LedgerAmountSign
+  // Amount stored as non-negative atomic integer units.
+  // NUMERIC(38, 0). Positive only; sign drives debit/credit.
+  amount            Decimal         @db.Decimal(38, 0)
+  // reversesPostingId — per-leg reversal link. UNIQUE prevents the SAME
+  // original posting from being reversed twice (toegether with reversesTxnId).
+  reversesPostingId String?         @map("reverses_posting_id") @db.Uuid
+  reversesPosting   LedgerPosting?  @relation("PostingReversal", fields: [reversesPostingId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedByPosting LedgerPosting[] @relation("PostingReversal")
+
+  @@index([ledgerTxnId], map: "ledger_posting_txn_idx")
+  @@index([accountType, accountId], map: "ledger_posting_account_idx")
+  @@unique([reversesPostingId], map: "ledger_posting_reverses_unique_uq")
+  @@map("ledger_postings")
 }

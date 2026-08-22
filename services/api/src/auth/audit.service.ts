@@ -272,8 +272,13 @@ export class AuditService {
    * P1-006: `resource` is now an optional param (default 'auth') so RBAC
    * decisions can record their true resource (e.g. 'admin/me') while every
    * pre-existing auth audit call keeps resource='auth' unchanged.
+   *
+   * P1-008: visibility elevated from private → public so the money-path
+   * AuditSensitiveMutation wrapper (in services/api) can directly reuse
+   * the same single AuditService sink for audit writes instead of
+   * introducing a second write path. No behaviour change.
    */
-  private async write(
+  async write(
     action: AuditAction,
     params: {
       actor?: string | null;
