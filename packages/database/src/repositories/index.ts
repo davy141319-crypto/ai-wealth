@@ -29,6 +29,7 @@ import { AuthNonceRepository } from './auth-nonce.repository';
 import { AuditLogRepository } from './audit-log.repository';
 import { IdempotencyKeyRepository } from './idempotency-key.repository';
 import { SystemConfigRepository } from './system-config.repository';
+import { LedgerRepository } from './ledger.repository';
 
 export { UserRepository } from './user.repository';
 export type { AuthorizationContext } from './user.repository';
@@ -38,6 +39,12 @@ export { AuthNonceRepository } from './auth-nonce.repository';
 export { AuditLogRepository } from './audit-log.repository';
 export { IdempotencyKeyRepository } from './idempotency-key.repository';
 export { SystemConfigRepository } from './system-config.repository';
+export { LedgerRepository } from './ledger.repository';
+export type {
+  LedgerTransactionCreateInput,
+  LedgerPostingCreateInput,
+  LedgerListOptions,
+} from './ledger.repository';
 
 export type TransactionClient = Prisma.TransactionClient;
 
@@ -49,8 +56,23 @@ export class Repositories {
   readonly auditLog: AuditLogRepository;
   readonly idempotencyKey: IdempotencyKeyRepository;
   readonly systemConfig: SystemConfigRepository;
+  readonly ledger: LedgerRepository;
+  /** Raw Prisma client (singleton or transaction-bound). Exposed for model
+   *  queries that intentionally live outside repositories, e.g. money-path
+   *  balanceProjection reading raw posting aggregates. Write operations
+   *  MUST still go through repositories to stay inside app-level contracts. */
+  readonly db: Prisma.TransactionClient | typeof prisma;
+  /** When this `Repositories` instance is bound to a Phase B Prisma
+   *  transaction client, `tx` holds the same transaction reference. Money-
+   *  path locking / advisory-lock helpers check for `tx` truthiness as a
+   *  strict guard against accidentally acquiring locks outside of a
+   *  running transaction (locks would never release otherwise). When the
+   *  instance uses the shared singleton client, `tx` is `undefined`. */
+  readonly tx: Prisma.TransactionClient | undefined;
 
   constructor(tx?: TransactionClient) {
+    this.db = tx ?? prisma;
+    this.tx = tx;
     this.user = new UserRepository(tx);
     this.wallet = new WalletRepository(tx);
     this.walletIdentity = new WalletIdentityRepository(tx);
@@ -58,6 +80,7 @@ export class Repositories {
     this.auditLog = new AuditLogRepository(tx);
     this.idempotencyKey = new IdempotencyKeyRepository(tx);
     this.systemConfig = new SystemConfigRepository(tx);
+    this.ledger = new LedgerRepository(tx);
   }
 
   /**

@@ -55,6 +55,8 @@ export type {
   IdempotencyKey,
   SystemConfig,
   SystemMeta,
+  LedgerTransaction,
+  LedgerPosting,
 } from '@prisma/client';
 
 export type {
@@ -64,6 +66,12 @@ export type {
   IdentityType,
   IdempotencyStatus,
   SystemConfigValueType,
+  // P1-008 enums (types)
+  LedgerTxnType,
+  LedgerAmountSign,
 } from '@prisma/client';
 
+// Runtime re-export for Prisma.Decimal / InputJsonValue / where types — kept
+// for packages that already depend on `import type { Prisma }`; but the
+// VALUE-ful `Prisma` lives in `index.ts` for runtime usage.
 export type { Prisma };

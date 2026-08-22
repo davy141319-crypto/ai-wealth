@@ -84,6 +84,35 @@ export class UserRepository {
     });
   }
 
+  /**
+   * Lock a user row with SELECT ... FOR UPDATE inside a transaction and
+   * return the current role + status. Used by P1-008 money-path locking
+   * strategy for accountType=USER (real user rows). Returns null when the
+   * user does not exist (caller must fail: you cannot lock a fake user row
+   * at the DB level, so a non-existent user id is rejected here).
+   *
+   * MUST be called inside an active Prisma transaction; if no transaction
+   * client is bound, throws to avoid silently using the singleton client.
+   */
+  async lockForUpdate(id: string): Promise<AuthorizationContext | null> {
+    if (!this.tx) {
+      throw new Error('UserRepository.lockForUpdate requires a Prisma transaction client');
+    }
+    // Use $queryRaw with parameter binding to safely inject the uuid into
+    // a SELECT … FOR UPDATE statement (Prisma findUnique does not support
+    // the FOR UPDATE lock strength on Postgres via the query builder).
+    const rows = await this.tx.$queryRaw<Prisma.Sql>`
+      SELECT role::text AS role, status::text AS status
+      FROM users
+      WHERE id = ${id}::uuid
+      FOR UPDATE
+    `;
+    const arr = Array.isArray(rows) ? (rows as Array<{ role: unknown; status: unknown }>) : [];
+    if (arr.length === 0) return null;
+    const r = arr[0];
+    return { role: r.role as UserRole, status: r.status as UserStatus };
+  }
+
   list(opts: UserListOptions = {}): Promise<User[]> {
     const { skip, take } = normalizePagination(opts);
     const where: Prisma.UserWhereInput = {};
