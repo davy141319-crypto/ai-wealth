@@ -463,6 +463,10 @@ export class TwoPhaseOrchestrator {
       // Non-retryable. Best-effort FAILED status if we had a PENDING row.
       const code = (txErr as AppError)?.reason ?? AppErrorCode.INTERNAL_ERROR;
       void IdempotencyIntegration.markFailedOutsideTx(
+        // Use the singleton (NOT enlisted in the rolled-back Phase B tx)
+        // idempotency-key repository. DI via this.reposFactory() so unit
+        // tests can pass a mock reposFactory without requiring a live DB.
+        this.reposFactory().idempotencyKey,
         input.scope,
         input.idempotencyKey,
         requestHash,

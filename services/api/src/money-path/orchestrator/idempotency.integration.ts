@@ -41,8 +41,11 @@
 //      durable (independent of the rolled-back Phase B tx). Never throws.
 // ============================================================================
 import { Prisma, Repositories, prisma } from '@ai-wealth/database';
-import { IdempotencyKeyRepository } from '@ai-wealth/database';
-import type { IdempotencyKey, IdempotencyStatus } from '@ai-wealth/database';
+import type {
+  IdempotencyKey,
+  IdempotencyStatus,
+  IdempotencyKeyRepository,
+} from '@ai-wealth/database';
 import { AppError, AppErrorCode, MoneyPathErrorCode } from '@ai-wealth/shared';
 
 export type ClaimResult =
@@ -192,15 +195,18 @@ export class IdempotencyIntegration {
   }
 
   /**
-   * Durable write of FAILED status via the singleton prisma client
-   * (outside the rolled-back Phase B transaction). Uses an atomic UPSERT
-   * so the FAILED row survives even if Phase B's PENDING claim was rolled
-   * back. Never throws; logs swallow.
+   * Durable write of FAILED status using the provided idempotency-key
+   * repository. Production callers MUST pass the singleton-repos
+   * `idempotencyKey` (bound to the un-enlisted Prisma client) so the
+   * UPSERT runs in its own implicit transaction — independent of the
+   * rolled-back Phase B tx. Tests inject a mock repository here so they
+   * do NOT require a live database / DATABASE_URL.
    *
    * `requestHash` is required so the FAILED row carries the same hash for
    * future same-hash retry / different-hash 409 conflict routing.
    */
   static async markFailedOutsideTx(
+    idemRepo: Pick<IdempotencyKeyRepository, 'upsertFailedAtomic'>,
     scope: string,
     key: string,
     requestHash: string,
@@ -208,11 +214,7 @@ export class IdempotencyIntegration {
     details?: unknown,
   ): Promise<void> {
     try {
-      // Use a fresh repository bound to the singleton prisma client — runs
-      // in its own implicit transaction (NOT the rolled-back Phase B tx),
-      // so the FAILED row is durable regardless of Phase B rollback.
-      const standaloneRepo = new IdempotencyKeyRepository();
-      await standaloneRepo.upsertFailedAtomic(
+      await idemRepo.upsertFailedAtomic(
         scope,
         key,
         requestHash,
