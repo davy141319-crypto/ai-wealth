@@ -52,6 +52,72 @@ const makeMockTxClient = (
         key: d.key,
       };
     }),
+    // PR #10 fix: atomic INSERT ... ON CONFLICT DO NOTHING RETURNING.
+    // Mock simulates Postgres semantics: returns row on claim, null on conflict.
+    claimAtomic: jest.fn(
+      async (
+        scope: string,
+        key: string,
+        requestHash: string,
+        _expiresAt: Date,
+      ): Promise<Record<string, unknown> | null> => {
+        void _expiresAt;
+        const k = `${scope}||${key}`;
+        if (idemRows.has(k)) return null; // ON CONFLICT DO NOTHING
+        const row = { status: 'PENDING' as IdempotencyStatus, requestHash, scope, key, id: 'r' };
+        idemRows.set(k, row);
+        return row;
+      },
+    ),
+    // PR #10 fix: atomic FAILED → PENDING reclaim via conditional UPDATE.
+    reclaimFailedAtomic: jest.fn(
+      async (
+        scope: string,
+        key: string,
+        requestHash: string,
+        _expiresAt: Date,
+      ): Promise<Record<string, unknown> | null> => {
+        void _expiresAt;
+        const k = `${scope}||${key}`;
+        const cur = idemRows.get(k);
+        if (!cur || cur.status !== 'FAILED' || cur.requestHash !== requestHash) return null;
+        cur.status = 'PENDING' as IdempotencyStatus;
+        cur.responseCode = undefined;
+        cur.responseBody = undefined;
+        return { ...cur, scope, key };
+      },
+    ),
+    // PR #10 fix: atomic UPSERT FAILED in independent tx — never throws.
+    upsertFailedAtomic: jest.fn(
+      async (
+        scope: string,
+        key: string,
+        requestHash: string,
+        responseBody: unknown,
+        _expiresAt: Date,
+      ): Promise<Record<string, unknown> | null> => {
+        void _expiresAt;
+        const k = `${scope}||${key}`;
+        const cur = idemRows.get(k);
+        if (!cur) {
+          const row = {
+            status: 'FAILED' as IdempotencyStatus,
+            requestHash,
+            responseBody,
+            scope,
+            key,
+            id: 'r',
+          };
+          idemRows.set(k, row);
+          return row;
+        }
+        if (cur.status === 'COMPLETED') return null;
+        cur.status = 'FAILED' as IdempotencyStatus;
+        cur.requestHash = requestHash;
+        cur.responseBody = responseBody;
+        return { ...cur, scope, key };
+      },
+    ),
     findUnique: jest.fn(async (scopeOrQ: unknown, maybeKey?: unknown) => {
       // Repositories-level: IdempotencyKeyRepository.findUnique(scope, key)
       // Prisma-level: repos.db.idempotencyKey.findUnique({ where: { scope_key: {...} } })
@@ -136,6 +202,11 @@ const makeMockTxClient = (
     // advisory lock + FOR UPDATE support: raw query helper
     $queryRaw: jest.fn(async () => [{ ok: 1 }]),
     $queryRawUnsafe: jest.fn(async () => []),
+    // PR #10 fix: locking.strategy now uses $executeRawUnsafe for
+    // pg_advisory_xact_lock (void-returning side-effect function). Mock
+    // returns 1 (rows-affected) to satisfy the $executeRaw contract.
+    $executeRaw: jest.fn(async () => 1),
+    $executeRawUnsafe: jest.fn(async () => 1),
   } as never;
   void hooks;
   return { client, idemRows };

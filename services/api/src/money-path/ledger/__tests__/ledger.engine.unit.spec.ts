@@ -128,7 +128,30 @@ describe('LedgerEngine unit tests', () => {
         },
       ],
     };
-    const createMock = jest.fn().mockResolvedValue({ id: 'rev-1', postings: [] });
+    const createdTxn = {
+      id: 'rev-1',
+      txnType: LedgerTxnType.REVERSAL,
+      currency: 'USDT',
+      scope: 'rev',
+      postings: [
+        {
+          id: 'rp1',
+          accountType: 'USER',
+          accountId: 'u1',
+          sign: LedgerAmountSign.DEBIT,
+          amount: { toString: () => '100' },
+        },
+        {
+          id: 'rp2',
+          accountType: 'PLATFORM',
+          accountId: 'platform',
+          sign: LedgerAmountSign.CREDIT,
+          amount: { toString: () => '100' },
+        },
+      ],
+    };
+    const createMock = jest.fn().mockResolvedValue(createdTxn);
+    const auditCreateMock = jest.fn().mockResolvedValue({ id: 'audit-1' });
     const repos = mockRepos({
       ledger: {
         // reverse() calls findTxnById → original
@@ -138,6 +161,9 @@ describe('LedgerEngine unit tests', () => {
         // write() reversesTxnId guard calls findReversalOf → null (no existing reversal)
         findReversalOf: jest.fn().mockResolvedValue(null),
         createTxnWithPostings: createMock,
+      },
+      auditLog: {
+        create: auditCreateMock,
       },
     });
     const e = new LedgerEngine(new AuditSensitiveMutationService());
@@ -156,6 +182,23 @@ describe('LedgerEngine unit tests', () => {
     expect(
       called[0].postings.map((x: { reversesPostingId: unknown }) => x.reversesPostingId),
     ).toEqual(['p1', 'p2']);
+
+    // PR #10 review blocker #4: reversal audit envelope must surface
+    //   reason = opts.reason verbatim (not "reversal:orig-1")
+    //   source = 'ledger'
+    //   correlation = originalTxnId (not the reversal's txnIdempotencyKey)
+    expect(auditCreateMock).toHaveBeenCalledTimes(1);
+    const auditArg = auditCreateMock.mock.calls[0][0];
+    const meta = auditArg.metadata as {
+      before: unknown;
+      after: unknown;
+      reason: string | null;
+      source: string;
+      correlation: string;
+    };
+    expect(meta.reason).toBe('wrong amount'); // verbatim opts.reason
+    expect(meta.source).toBe('ledger');
+    expect(meta.correlation).toBe('orig-1'); // original txn id, not 'rev-a'
   });
 
   it('double reversal → LEDGER_REVERSAL_ALREADY_EXISTS before write', async () => {

@@ -87,14 +87,14 @@ export async function acquireAccountLocks(
     } else {
       // PostgreSQL service-side hash — hashtextextended(text, bigint) → int8
       // pg_advisory_xact_lock(bigint) automatically releases at tx end.
+      // NOTE: pg_advisory_xact_lock returns void — do NOT cast to ::int or
+      // PostgreSQL raises "cannot cast type void to integer" (42846).
+      // We execute the function for its side effect (lock acquisition) only.
       const key = canonicalAccountKey(t);
-      const locked = await tx.$queryRawUnsafe<Array<{ ok: 1 }>>(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, ${ADVISORY_LOCK_SEED.toString()}::bigint)::bigint # 0::bigint)::int AS ok`,
+      await tx.$executeRawUnsafe(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, ${ADVISORY_LOCK_SEED.toString()}::bigint)::bigint # 0::bigint)`,
         key,
       );
-      // Consume return to silence unused var warnings — if no exception
-      // the lock is held.
-      void locked;
       result.advisoryLocks.push({ canonicalKey: key });
     }
   }

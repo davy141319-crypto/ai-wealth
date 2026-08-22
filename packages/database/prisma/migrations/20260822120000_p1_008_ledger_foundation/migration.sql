@@ -63,8 +63,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS "ledger_txn_scope_idempotency_uq"
 -- Prevent double-reversal of the SAME original transaction. Undo of a
 -- reversal is performed by reversing the reversal txn itself, NOT by
 -- writing a second reversal that targets the original again.
+--
+-- NOTE: plain UNIQUE INDEX (no partial WHERE clause) so the DB object
+-- matches Prisma `@@unique([reversesTxnId])` 1:1 (no schema/migration
+-- drift). PostgreSQL nullable UNIQUE columns already allow multiple NULLs
+-- (NULL is considered distinct from every other value incl. itself), so
+-- non-reversal rows (reverses_txn_id IS NULL) do not collide. This
+-- removes the previous partial-index drift flagged in PR #10 review.
 CREATE UNIQUE INDEX IF NOT EXISTS "ledger_txn_reverses_unique_uq"
-  ON "ledger_transactions"("reverses_txn_id") WHERE "reverses_txn_id" IS NOT NULL;
+  ON "ledger_transactions"("reverses_txn_id");
 
 CREATE INDEX IF NOT EXISTS "ledger_txn_type_created_idx"
   ON "ledger_transactions"("txn_type", "created_at");
@@ -108,8 +115,12 @@ CREATE INDEX IF NOT EXISTS "ledger_posting_account_idx"
 
 -- Prevent double reversal of a single original posting (paired with the
 -- transaction-level UNIQUE(reverses_txn_id) above).
+--
+-- NOTE: plain UNIQUE INDEX (no partial WHERE clause) so the DB object
+-- matches Prisma `@@unique([reversesPostingId])` 1:1 (no schema/migration
+-- drift). PostgreSQL nullable UNIQUE columns already allow multiple NULLs.
 CREATE UNIQUE INDEX IF NOT EXISTS "ledger_posting_reverses_unique_uq"
-  ON "ledger_postings"("reverses_posting_id") WHERE "reverses_posting_id" IS NOT NULL;
+  ON "ledger_postings"("reverses_posting_id");
 
 ALTER TABLE "ledger_postings"
   ADD CONSTRAINT "ledger_postings_ledger_txn_id_fkey"

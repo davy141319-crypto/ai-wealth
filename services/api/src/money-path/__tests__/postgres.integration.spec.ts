@@ -81,11 +81,49 @@ beforeAll(async () => {
     await prisma.$queryRawUnsafe('SELECT 1');
   } catch {
     process.env['SKIP_P1008_INTEGRATION'] = '1';
+    return;
+  }
+  // Clean slate: remove ALL rows from the P1-008 test tables so leftover
+  // committed data from previous runs (orch.run commits ledger txns;
+  // migration-appendonly.spec.ts commits via seededId) does not cause
+  // Serializable predicate-lock conflicts or countTxns()!=0 assertions.
+  // TRUNCATE bypasses the append-only BEFORE UPDATE OR DELETE row triggers
+  // (TRUNCATE is a bulk DDL operation that does not fire row-level triggers).
+  // NOTE: FeatureFlagService uses the existing `system_configs` table (no
+  // `feature_flags` table exists in P1-008), so we truncate system_configs
+  // too to clear any leftover flag rows from prior runs.
+  try {
+    await prisma.$executeRawUnsafe(
+      `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
+    );
+  } catch {
+    /* ignore — table may not be migrated in all envs */
+  }
+  // Ensure the fixture user (valid UUID used by orchestrator ledger postings)
+  // exists in the DB so that acquireAccountLocks → lockForUpdate succeeds.
+  // Without this row, lockForUpdate returns false and the orchestrator throws
+  // CONCURRENCY_LOCK_TIMEOUT (treated as retryable → 503 after auto-retry).
+  try {
+    await prisma.user.upsert({
+      where: { id: 'a30077fe-c6ef-4d7a-a71f-9e4c35b7f2d1' },
+      create: { id: 'a30077fe-c6ef-4d7a-a71f-9e4c35b7f2d1', status: 'ACTIVE', role: UserRole.USER },
+      update: {},
+    });
+  } catch {
+    /* user table may not be migrated; ignore */
   }
 });
 
 afterAll(async () => {
   if (requireLiveDB()) {
+    // Clean up committed test data so the next run starts clean.
+    try {
+      await prisma.$executeRawUnsafe(
+        `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
+      );
+    } catch {
+      /* ignore */
+    }
     try {
       await prisma.$disconnect();
     } catch {
@@ -110,9 +148,33 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
   })();
 
   async function txn<T>(fn: (tx: Repositories) => Promise<T>): Promise<T> {
-    return prisma.$transaction(async (client) => fn(new Repositories(client)), {
-      isolationLevel: 'Serializable',
-    });
+    // Wrap in a Serializable transaction that ALWAYS rolls back after the
+    // test callback completes. This ensures tests don't leave committed
+    // data that would interfere with subsequent tests (e.g., test 23/24
+    // asserting countTxns()===0 would see rows from test 1/9/10 etc.).
+    // We capture the return value, then throw a sentinel to force rollback.
+    const ROLLBACK_SENTINEL = '__TXN_ROLLBACK_SENTINEL__';
+    let result: T | undefined;
+    let assigned = false;
+    try {
+      await prisma.$transaction(
+        async (client) => {
+          result = await fn(new Repositories(client));
+          assigned = true;
+          // Force rollback — throw a sentinel that we catch below.
+          throw new Error(ROLLBACK_SENTINEL);
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (e) {
+      if (e instanceof Error && e.message === ROLLBACK_SENTINEL) {
+        // Expected — the transaction was rolled back on purpose.
+        if (!assigned) throw new Error('txn callback did not assign result');
+        return result as T;
+      }
+      throw e;
+    }
+    return result as T;
   }
 
   // ---------- Ledger scenarios (item 1..14 from user list) ----------------
@@ -231,8 +293,11 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
         repos,
         fixtureTxn({ scope: 's15', txnIdempotencyKey: 'k15' }),
       );
+      // Use the transaction client (repos.db) so the UPDATE runs inside the
+      // same Serializable transaction. The singleton prisma client would be
+      // a different connection that can't see uncommitted rows (deadlock).
       await expect(
-        prisma.$executeRawUnsafe(
+        repos.db.$executeRawUnsafe(
           `UPDATE ledger_transactions SET metadata = $1::jsonb WHERE id = $2::uuid`,
           { hacked: true },
           created.txn.id,
@@ -250,7 +315,7 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
       );
       const postingId = created.txn.postings[0].id;
       await expect(
-        prisma.$executeRawUnsafe(
+        repos.db.$executeRawUnsafe(
           `UPDATE ledger_postings SET amount = amount + 1 WHERE id = $1::uuid`,
           postingId,
         ),
@@ -259,31 +324,42 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
   });
 
   it('16/18/19. DELETE ledger_transactions + DELETE postings → abort & rollback preserves rows', async () => {
-    // We test DELETE behaviour here inside a nested transaction via savepoint-ish try/catch.
-    const beforeTx: { txn?: LedgerTransaction } = {};
-    await txn(async (repos) => {
+    // Commit the test ledger txn first (separate transaction), then run each
+    // DELETE as a standalone autocommit statement. PostgreSQL trigger exceptions
+    // abort the current transaction — if both DELETEs ran inside the same tx,
+    // the second would fail with 25P02 (transaction aborted) instead of the
+    // expected P0001 (append-only trigger). Autocommit mode ensures each
+    // DELETE is its own transaction that rolls back independently.
+    const txnId = await prisma.$transaction(async (tx) => {
+      const repos = new Repositories(tx);
       const engine = new LedgerEngine(new AuditSensitiveMutationService());
-      beforeTx.txn = (
-        await engine.write(repos, fixtureTxn({ scope: 's16', txnIdempotencyKey: 'k16' }))
-      ).txn;
-      await expect(
-        prisma.$executeRawUnsafe(
-          `DELETE FROM ledger_postings WHERE ledger_txn_id = $1::uuid`,
-          beforeTx.txn!.id,
-        ),
-      ).rejects.toThrow(/APPEND-ONLY|forbidden/);
-      await expect(
-        prisma.$executeRawUnsafe(
-          `DELETE FROM ledger_transactions WHERE id = $1::uuid`,
-          beforeTx.txn!.id,
-        ),
-      ).rejects.toThrow(/APPEND-ONLY|forbidden/);
+      const r = await engine.write(repos, fixtureTxn({ scope: 's16', txnIdempotencyKey: 'k16' }));
+      return r.txn.id;
     });
-    // After txn commits: our seeded rows still exist because DELETE errors
-    // caused sub-transaction abort, but our outer txn still committed the
-    // write. Confirm count of s16 scope = 1.
-    const count = await prisma.ledgerTransaction.count({ where: { scope: 's16' } });
-    expect(count).toBeGreaterThanOrEqual(1);
+
+    // DELETE postings → trigger aborts, autocommit rolls back the statement.
+    await expect(
+      prisma.$executeRawUnsafe(`DELETE FROM ledger_postings WHERE ledger_txn_id = $1::uuid`, txnId),
+    ).rejects.toThrow(/APPEND-ONLY|forbidden/);
+
+    // DELETE transactions → trigger aborts (separate autocommit statement).
+    await expect(
+      prisma.$executeRawUnsafe(`DELETE FROM ledger_transactions WHERE id = $1::uuid`, txnId),
+    ).rejects.toThrow(/APPEND-ONLY|forbidden/);
+
+    // Rows still exist (each DELETE was rolled back by the trigger).
+    expect(await prisma.ledgerTransaction.count({ where: { id: txnId } })).toBe(1);
+    expect(await prisma.ledgerPosting.count({ where: { ledgerTxnId: txnId } })).toBe(2);
+    // Clean up committed test data so subsequent tests asserting
+    // countTxns()===0 are not affected. Append-only triggers block DELETE,
+    // so we use TRUNCATE (bulk DDL, bypasses row-level triggers).
+    try {
+      await prisma.$executeRawUnsafe(
+        `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
+      );
+    } catch {
+      /* ignore */
+    }
   });
 
   // ---------- Audit / envelope (item 20) -----------------------------------
@@ -406,7 +482,10 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
     // mid-transaction (this simulates concurrent flip).
     const _orchestrator2 = new TwoPhaseOrchestrator();
     void _orchestrator2;
-    await txn(async (repos) => {
+    // COMMIT the flag (not inside the rollback txn() wrapper) so that
+    // orch.run() — which reads via the singleton prisma client — can see it.
+    await prisma.$transaction(async (tx) => {
+      const repos = new Repositories(tx);
       const svc = new FeatureFlagService(new AuditSensitiveMutationService());
       await svc.__testOnlyUpsert(repos, FeatureFlagService.key('testnet', 'flag_race'), true);
     });
@@ -431,7 +510,9 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
     void _FlipEngine; // class declared as fixture for future expansions
     // Here we just confirm a regular happy path A+B works (flags off → error
     // is correct; flags on → success).
-    await txn(async (repos) => {
+    // COMMIT the flag so orch.run() can see it via the singleton prisma client.
+    await prisma.$transaction(async (tx) => {
+      const repos = new Repositories(tx);
       const svc = new FeatureFlagService(new AuditSensitiveMutationService());
       await svc.__testOnlyUpsert(repos, FeatureFlagService.key('testnet', 'flag_race'), true);
     });
@@ -453,6 +534,16 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
       riskEngine: new RiskEngineStub(),
     });
     expect(okRun.statusCode).toBe(200);
+    // Test 25/27 commits ledger rows via orch.run(). Clean up committed data
+    // immediately so subsequent Serializable transactions (rollback-tx tests)
+    // don't hit predicate-lock write conflicts on cross-worker jest runs.
+    try {
+      await prisma.$executeRawUnsafe(
+        `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
+      );
+    } catch {
+      /* ignore */
+    }
   });
 
   // ---------- Idempotency (28..32) + crash (34) ---------------------------
@@ -531,6 +622,15 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
         riskEngine: new RiskEngineStub(),
       }),
     ).rejects.toHaveProperty('reason', MoneyPathErrorCode.IDEMPOTENCY_CONFLICT);
+    // Test 28-32 commits ledger rows via orch.run(). Clean up committed data
+    // immediately so PR #10 fix tests that follow use a clean DB.
+    try {
+      await prisma.$executeRawUnsafe(
+        `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
+      );
+    } catch {
+      /* ignore */
+    }
   });
 
   // ---------- 33. serialization retry exactly once — mocked by a primitive
@@ -546,5 +646,284 @@ maybeDescribe('P1-008 live Postgres integration (T20, T21)', () => {
   // file (controller-db-bypass.spec.ts).
   it('35. controller DB bypass rule — enforced via architecture spec', () => {
     expect(typeof require).toBe('function');
+  });
+
+  // ==================================================================
+  // PR #10 review blocker regression tests (Fix-1 / Fix-2 / Fix-3 / Fix-4)
+  // ==================================================================
+
+  describe('PR #10 fixes: idempotency atomic claim + FAILED UPSERT + UNIQUE drift + reversal audit', () => {
+    // Clean up any committed idempotency rows left by tests that use
+    // prisma.$transaction directly (B, C, D) rather than the rollback-only
+    // txn() wrapper. This prevents cross-test data pollution.
+    afterEach(async () => {
+      try {
+        await prisma.idempotencyKey.deleteMany({
+          where: { scope: { startsWith: 'pr10fix_' } },
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+    // A. PostgreSQL idempotency conflict — two concurrent same scope/key
+    //    claims must NOT abort the surrounding transaction via unique
+    //    violation. The previous INSERT+catch-P2002 flow did. The fixed
+    //    ON CONFLICT DO NOTHING RETURNING flow must keep the tx usable.
+    it('A. concurrent same scope/key claim → exactly one CLAIMED, tx stays usable', async () => {
+      const scope = 'pr10fix_a';
+      const key = 'k-a';
+      const hash = 'hash-a';
+      const ttl = new Date(Date.now() + 60_000);
+      // First claim wins
+      await txn(async (repos) => {
+        const r1 = await repos.idempotencyKey.claimAtomic(scope, key, hash, ttl);
+        expect(r1).not.toBeNull();
+        expect(r1?.status).toBe('PENDING');
+        // Second claim inside SAME tx — must return null, NOT throw P2002,
+        // and the tx must remain usable for subsequent queries.
+        const r2 = await repos.idempotencyKey.claimAtomic(scope, key, hash, ttl);
+        expect(r2).toBeNull();
+        // Tx is still alive: we can read the existing row.
+        const existing = await repos.idempotencyKey.findUnique(scope, key);
+        expect(existing?.status).toBe('PENDING');
+        expect(existing?.requestHash).toBe(hash);
+      });
+    });
+
+    // B. Concurrent same key — at most one CLAIMED across two real
+    //    transactions running in parallel. We use Promise.all against two
+    //    prisma.$transaction calls. Exactly one resolves to a row, the
+    //    other resolves to null. Both transactions commit cleanly.
+    it('B. concurrent same key across two parallel tx → exactly one CLAIMED', async () => {
+      const scope = 'pr10fix_b';
+      const key = 'k-b';
+      const hash = 'hash-b';
+      const ttl = new Date(Date.now() + 60_000);
+      const results = await Promise.all([
+        prisma
+          .$transaction(async (tx) => {
+            const r = new Repositories(tx);
+            return r.idempotencyKey.claimAtomic(scope, key, hash, ttl);
+          })
+          .then((r) => r?.status ?? 'null')
+          .catch((e) => `err:${(e as Error).message}`),
+        prisma
+          .$transaction(async (tx) => {
+            const r = new Repositories(tx);
+            return r.idempotencyKey.claimAtomic(scope, key, hash, ttl);
+          })
+          .then((r) => r?.status ?? 'null')
+          .catch((e) => `err:${(e as Error).message}`),
+      ]);
+      const claimed = results.filter((s) => s === 'PENDING').length;
+      const conflicts = results.filter((s) => s === 'null').length;
+      const errors = results.filter((s) => s.startsWith('err:')).length;
+      expect(errors).toBe(0); // no transaction-aborted errors
+      expect(claimed).toBe(1); // exactly one worker wins
+      expect(conflicts).toBe(1); // the other gets ON CONFLICT DO NOTHING
+    });
+
+    // C. FAILED first-attempt persistence — Phase B rollback must leave
+    //    a durable FAILED row even though the PENDING claim was rolled back
+    //    with the rest of the Phase B transaction. The fix uses
+    //    upsertFailedAtomic in an INDEPENDENT transaction.
+    it('C. FAILED persistence survives Phase B rollback (independent tx UPSERT)', async () => {
+      const scope = 'pr10fix_c';
+      const key = 'k-c';
+      const hash = 'hash-c';
+      // Simulate: Phase B starts, claims PENDING, then rolls back.
+      try {
+        await prisma.$transaction(async (tx) => {
+          const r = new Repositories(tx);
+          await r.idempotencyKey.claimAtomic(scope, key, hash, new Date(Date.now() + 60_000));
+          // Simulate Phase B failure → throw to roll back.
+          throw new Error('simulated phase B failure');
+        });
+      } catch (e) {
+        expect((e as Error).message).toContain('simulated phase B failure');
+      }
+      // After Phase B rollback, NO PENDING row should exist.
+      const afterRollback = await prisma.idempotencyKey.findUnique({
+        where: { scope_key: { scope, key } },
+      });
+      expect(afterRollback).toBeNull();
+      // Now mark FAILED via the independent-tx upsert (mirrors what
+      // IdempotencyIntegration.markFailedOutsideTx does).
+      const standaloneRepo = new (await import('@ai-wealth/database')).IdempotencyKeyRepository();
+      const failed = await standaloneRepo.upsertFailedAtomic(
+        scope,
+        key,
+        hash,
+        { reason: MoneyPathErrorCode.STATE_MUTATION_FAILED, failedAt: new Date().toISOString() },
+        new Date(Date.now() + 60_000),
+      );
+      expect(failed).not.toBeNull();
+      expect(failed?.status).toBe('FAILED');
+      // The FAILED row is durable — queryable from a fresh tx.
+      const durable = await prisma.idempotencyKey.findUnique({
+        where: { scope_key: { scope, key } },
+      });
+      expect(durable?.status).toBe('FAILED');
+      expect(durable?.requestHash).toBe(hash);
+      const body = durable?.responseBody as { reason?: string };
+      expect(body?.reason).toBe(MoneyPathErrorCode.STATE_MUTATION_FAILED);
+    });
+
+    // D. FAILED same-hash reclaim — at most one worker can flip FAILED →
+    //    PENDING via the atomic conditional UPDATE. Concurrent callers
+    //    get null and must re-read.
+    it('D. FAILED same-hash reclaim → exactly one CLAIMED', async () => {
+      const scope = 'pr10fix_d';
+      const key = 'k-d';
+      const hash = 'hash-d';
+      // Seed a FAILED row using upsertFailedAtomic.
+      const standaloneRepo = new (await import('@ai-wealth/database')).IdempotencyKeyRepository();
+      await standaloneRepo.upsertFailedAtomic(
+        scope,
+        key,
+        hash,
+        { reason: MoneyPathErrorCode.SERIALIZATION_FAILURE, failedAt: new Date().toISOString() },
+        new Date(Date.now() + 60_000),
+      );
+      // Two parallel reclaim attempts — exactly one should succeed.
+      const ttl = new Date(Date.now() + 60_000);
+      const results = await Promise.all([
+        prisma
+          .$transaction(async (tx) => {
+            const r = new Repositories(tx);
+            return r.idempotencyKey.reclaimFailedAtomic(scope, key, hash, ttl);
+          })
+          .then((r) => (r ? 'RECLAIMED' : 'null'))
+          .catch((e) => `err:${(e as Error).message}`),
+        prisma
+          .$transaction(async (tx) => {
+            const r = new Repositories(tx);
+            return r.idempotencyKey.reclaimFailedAtomic(scope, key, hash, ttl);
+          })
+          .then((r) => (r ? 'RECLAIMED' : 'null'))
+          .catch((e) => `err:${(e as Error).message}`),
+      ]);
+      const reclaimed = results.filter((s) => s === 'RECLAIMED').length;
+      const nulls = results.filter((s) => s === 'null').length;
+      const errors = results.filter((s) => s.startsWith('err:')).length;
+      expect(errors).toBe(0);
+      expect(reclaimed).toBe(1);
+      expect(nulls).toBe(1);
+      // Final state is PENDING.
+      const after = await prisma.idempotencyKey.findUnique({
+        where: { scope_key: { scope, key } },
+      });
+      expect(after?.status).toBe('PENDING');
+    });
+
+    // E. migration / schema UNIQUE consistency — Prisma @@unique must
+    //    match the DB index definition 1:1 (no partial WHERE clause drift).
+    //    We query pg_indexes to assert the indexes exist as plain UNIQUE
+    //    (no partial predicate) and match the Prisma schema declarations.
+    it('E. migration UNIQUE indexes match Prisma schema (no partial WHERE drift)', async () => {
+      const rows = await prisma.$queryRaw<Array<{ indexname: string; indexdef: string }>>`
+        SELECT indexname, indexdef
+        FROM pg_indexes
+        WHERE indexname IN (
+          'ledger_txn_reverses_unique_uq',
+          'ledger_posting_reverses_unique_uq'
+        )
+        ORDER BY indexname
+      `;
+      expect(rows.length).toBe(2);
+      for (const r of rows) {
+        // Must be a UNIQUE INDEX.
+        expect(r.indexdef).toMatch(/CREATE UNIQUE INDEX/);
+        // Must NOT contain a partial `WHERE` clause — that was the drift
+        // flagged in PR #10 review blocker #3.
+        expect(r.indexdef).not.toMatch(/\bWHERE\b/i);
+      }
+      // Specifically: reverses_txn_id and reverses_posting_id are the
+      // indexed columns (single-column plain UNIQUE).
+      const txnIdx = rows.find((r) => r.indexname === 'ledger_txn_reverses_unique_uq');
+      const postingIdx = rows.find((r) => r.indexname === 'ledger_posting_reverses_unique_uq');
+      expect(txnIdx?.indexdef).toMatch(/reverses_txn_id/);
+      expect(postingIdx?.indexdef).toMatch(/reverses_posting_id/);
+    });
+
+    // F. reversal audit envelope — reason/source/correlation must be the
+    //    verbatim caller reason, 'ledger', and originalTxnId respectively.
+    it('F. reversal audit envelope: reason=opts.reason, source=ledger, correlation=originalTxnId', async () => {
+      await txn(async (repos) => {
+        const engine = new LedgerEngine(new AuditSensitiveMutationService());
+        const original = await engine.write(
+          repos,
+          fixtureTxn({ scope: 'pr10fix_f', txnIdempotencyKey: 'orig-f' }),
+        );
+        const reason = 'incorrect commission amount';
+        await engine.reverse(repos, {
+          originalTxnId: original.txn.id,
+          scope: 'pr10fix_f',
+          txnIdempotencyKey: 'rev-f',
+          actorUserId: null,
+          requestId: 'req-f',
+          reason,
+        });
+        // Read the audit rows tied to this scope's ledger writes. Must use
+        // the transaction client (repos.db) — NOT the singleton prisma —
+        // because the audit rows were written inside this uncommitted
+        // Serializable transaction and are invisible to other connections.
+        // Both the original write and the reversal create audit rows with
+        // resource='ledger'; we find the reversal's row by matching the
+        // correlation to the original txn id (set by auditCorrelation).
+        const allAuditRows = await repos.db.auditLog.findMany({
+          where: { resource: 'ledger' },
+          orderBy: { createdAt: 'desc' },
+        });
+        expect(allAuditRows.length).toBeGreaterThanOrEqual(1);
+        const reversalAudit = allAuditRows.find((r) => {
+          const m = r.metadata as { correlation?: string; reason?: string | null };
+          return m.correlation === original.txn.id && m.reason === reason;
+        });
+        expect(reversalAudit).toBeDefined();
+        const meta = reversalAudit!.metadata as {
+          reason: string | null;
+          source: string;
+          correlation: string;
+        };
+        expect(meta.reason).toBe(reason); // verbatim — NOT "reversal:<id>"
+        expect(meta.source).toBe('ledger');
+        expect(meta.correlation).toBe(original.txn.id); // NOT 'rev-f'
+      });
+    });
+
+    // G. Unique-enforcement on reverses_txn_id and reverses_posting_id —
+    //    second reversal of the same original must fail with the DB unique
+    //    constraint (append-only + UNIQUE anti-double-reversal).
+    it('G. duplicate reversal still blocked by plain UNIQUE (no partial WHERE loophole)', async () => {
+      await txn(async (repos) => {
+        const engine = new LedgerEngine(new AuditSensitiveMutationService());
+        const original = await engine.write(
+          repos,
+          fixtureTxn({ scope: 'pr10fix_g', txnIdempotencyKey: 'orig-g' }),
+        );
+        // First reversal succeeds.
+        await engine.reverse(repos, {
+          originalTxnId: original.txn.id,
+          scope: 'pr10fix_g',
+          txnIdempotencyKey: 'rev-g-1',
+          actorUserId: null,
+          requestId: 'r',
+          reason: 'first',
+        });
+        // Second reversal of the SAME original — app layer throws
+        // LEDGER_REVERSAL_ALREADY_EXISTS (DB UNIQUE remains the belt).
+        await expect(
+          engine.reverse(repos, {
+            originalTxnId: original.txn.id,
+            scope: 'pr10fix_g',
+            txnIdempotencyKey: 'rev-g-2',
+            actorUserId: null,
+            requestId: 'r2',
+            reason: 'second',
+          }),
+        ).rejects.toHaveProperty('reason', MoneyPathErrorCode.LEDGER_REVERSAL_ALREADY_EXISTS);
+      });
+    });
   });
 });

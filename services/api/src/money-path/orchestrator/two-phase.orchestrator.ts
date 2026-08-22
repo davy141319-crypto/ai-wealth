@@ -465,6 +465,7 @@ export class TwoPhaseOrchestrator {
       void IdempotencyIntegration.markFailedOutsideTx(
         input.scope,
         input.idempotencyKey,
+        requestHash,
         String(code),
         txErr instanceof Error ? { message: txErr.message } : undefined,
       );

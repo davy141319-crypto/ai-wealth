@@ -96,6 +96,23 @@ describe('P1-008 migration boundary (T21 / T25 boundary audit)', () => {
     const skip = !process.env['DATABASE_URL'];
     const maybed = skip ? describe.skip : describe;
     maybed('append-only triggers on live DB', () => {
+      // Clean up committed rows from this describe block after all tests run.
+      // Tests commit ledger rows (via seededId) — append-only triggers block
+      // DELETE, so we use TRUNCATE (bulk DDL bypasses row-level triggers).
+      // Also truncates other P1-008 tables so downstream describe blocks
+      // (postgres.integration.spec.ts) don't see leftover committed rows
+      // which would cause Serializable predicate-lock deadlocks.
+      afterAll(async () => {
+        if (!process.env['DATABASE_URL']) return;
+        try {
+          await prisma.$executeRawUnsafe(
+            `TRUNCATE TABLE ledger_postings, ledger_transactions, idempotency_keys, audit_logs, system_configs CASCADE`,
+          );
+        } catch {
+          /* ignore */
+        }
+      });
+
       async function seededId(): Promise<string> {
         return prisma.$transaction(
           async (tx) => {
@@ -209,7 +226,11 @@ describe('P1-008 migration boundary (T21 / T25 boundary audit)', () => {
                 ],
               });
               // Simulated rollback via thrown app error (status mutation fail).
-              throw new AppError(500, MoneyPathErrorCode.STATE_MUTATION_FAILED, 'rollback');
+              // Pass reason in opts so (e as AppError).reason is set — the
+              // constructor's 4th arg is { reason?, details? }, not the 3rd.
+              throw new AppError(500, MoneyPathErrorCode.STATE_MUTATION_FAILED, 'rollback', {
+                reason: MoneyPathErrorCode.STATE_MUTATION_FAILED,
+              });
             },
             { isolationLevel: 'Serializable' },
           );

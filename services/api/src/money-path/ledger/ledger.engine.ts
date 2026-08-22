@@ -73,6 +73,18 @@ export interface WriteJournalInput {
    *  internal REVERSAL flows. Otherwise MANUAL_ADMIN txnType forces the
    *  flag to be ON. Default false. */
   _bypassManualAdminFlag?: boolean;
+  /** Audit envelope override: when set, the audit metadata `reason`
+   *  field is set to this value verbatim (instead of the default
+   *  `reversal:<reversesTxnId>` synthetic string). PR #10 review
+   *  blocker #4: reversals must surface the caller-provided reason
+   *  (e.g. "wrong amount") — never a synthetic `reversal:<id>`. */
+  auditReason?: string | null;
+  /** Audit envelope override: when set, the audit metadata `correlation`
+   *  field is set to this value (instead of the default txnIdempotencyKey).
+   *  PR #10 review blocker #4: reversals must correlate to the original
+   *  LedgerTransaction id being reversed (so audit trails can pivot from
+   *  the reversal record straight to the original txn). */
+  auditCorrelation?: string | null;
 }
 
 export interface WriteJournalResult {
@@ -402,9 +414,20 @@ export class LedgerEngine {
           amount: p.amount.toString(),
         })),
       },
-      reason: input.reversesTxnId ? `reversal:${input.reversesTxnId}` : null,
+      // PR #10 review blocker #4: audit envelope `reason` must surface
+      // the caller-provided reason verbatim for reversals (never the
+      // synthetic `reversal:<id>` string). `auditReason` is set by
+      // LedgerEngine.reverse() to opts.reason. For non-reversal writes
+      // the reason stays null.
+      reason: input.auditReason ?? null,
       source: 'ledger' as const,
-      correlation: input.txnIdempotencyKey,
+      // PR #10 review blocker #4: for reversals, audit `correlation` is
+      // the original LedgerTransaction.id (so audit pivot from reversal
+      // record to original is direct). For non-reversal writes it stays
+      // the txnIdempotencyKey (callers can pivot by idempotency key).
+      correlation:
+        input.auditCorrelation ??
+        (input.reversesTxnId ? input.reversesTxnId : input.txnIdempotencyKey),
     };
     const envelopeCheck = validateAuditMetadataEnvelope(envelope);
     if (!envelopeCheck.ok) {
@@ -481,6 +504,11 @@ export class LedgerEngine {
       reversesTxnId: original.id,
       metadata: reversalMeta,
       _bypassManualAdminFlag: true,
+      // PR #10 review blocker #4: audit envelope must surface the
+      // caller-provided reason verbatim and correlate to the original
+      // transaction (not the reversal's own idempotency key).
+      auditReason: opts.reason,
+      auditCorrelation: original.id,
     });
   }
 
